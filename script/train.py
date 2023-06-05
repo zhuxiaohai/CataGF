@@ -15,7 +15,7 @@ from confgf import models, dataset, runner, utils
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='confgf')
-    parser.add_argument('--config_path', type=str, help='path of dataset', required=True)
+    parser.add_argument('--config_path', type=str, help='path of dataset', default='/home/guest/ConfGF/config/qm9_default.yml')
     parser.add_argument('--seed', type=int, default=2021, help='overwrite config seed')
 
     args = parser.parse_args()

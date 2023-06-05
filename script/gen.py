@@ -18,15 +18,18 @@ from torch_geometric.transforms import Compose
 
 from confgf import models, dataset, runner, utils
 
+from rdkit.Chem.rdmolfiles import MolToPDBFile
+from rdkit.Chem.AllChem import EmbedMolecule
+
 
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='confgf')
-    parser.add_argument('--config_path', type=str, help='path of dataset', required=True)
-    parser.add_argument('--generator', type=str, help='type of generator [ConfGF, ConfGFDist]', required=True)
+    parser.add_argument('--config_path', type=str, help='path of dataset', default='/home/guest/ConfGF/config/qm9_default.yml')
+    parser.add_argument('--generator', type=str, help='type of generator [ConfGF, ConfGFDist]', default='ConfGF')
     parser.add_argument('--num_repeat', type=int, default=None, help='end idx of test generation')
-    parser.add_argument('--start', type=int, default=-1, help='start idx of test generation')
-    parser.add_argument('--end', type=int, default=-1, help='end idx of test generation')
+    parser.add_argument('--start', type=int, default=0, help='start idx of test generation')
+    parser.add_argument('--end', type=int, default=200, help='end idx of test generation')
     parser.add_argument('--smiles', type=str, default=None, help='smiles for generation')
     parser.add_argument('--seed', type=int, default=2021, help='overwrite config seed')
 
@@ -107,9 +110,18 @@ if __name__ == '__main__':
     solver.load(config.test.init_checkpoint, epoch=config.test.epoch)
 
     if args.smiles is not None:
-        solver.generate_samples_from_smiles(args.smiles, args.generator, \
-                                            num_repeat=1, keep_traj=True,
-                                            out_path=config.test.output_path)
+        out = solver.generate_samples_from_smiles(args.smiles, args.generator, \
+                                                  num_repeat=1, keep_traj=True,
+                                                  out_path=config.test.output_path)
+        EmbedMolecule(out.rdmol, useRandomCoords=True)
+        gen_mol = utils.set_rdmol_positions(out.rdmol, out.pos_gen)
+        pdb_name = os.path.join(config.test.output_path, '%s_%s.pdb' % (args.generator, out.smiles))
+        MolToPDBFile(gen_mol, pdb_name)
+        # save trail
+        for i in range(out.pos_gen_traj_visual.shape[0]):
+            gen_mol = utils.set_rdmol_positions(out.rdmol, out.pos_gen_traj_visual[i])
+            pdb_name = os.path.join(config.test.output_path, '%s_%s_%s.pdb' % (args.generator, out.smiles, i))
+            MolToPDBFile(gen_mol, pdb_name)
 
     if args.start != -1 and args.end != -1:
         solver.generate_samples_from_testset(args.start, args.end, \

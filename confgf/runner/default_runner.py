@@ -329,6 +329,7 @@ class DefaultRunner(object):
             raise NotImplementedError
 
         batch = batch.to('cpu').to_data_list()
+        pos_traj_visual = pos_traj[:, -1].to('cpu')
         pos_traj = pos_traj.view(-1, 3).to('cpu')
         pos_traj_step = pos_traj.size(0) // return_data.num_nodes
 
@@ -337,6 +338,7 @@ class DefaultRunner(object):
         for i in range(len(batch)):
             all_pos.append(batch[i].pos_gen)
         return_data.pos_gen = torch.cat(all_pos, 0) # (num_repeat * num_node, 3)
+        return_data.pos_gen_traj_visual = pos_traj_visual  # (num_sigmas, num_repeat * num_node, 3)
         return_data.num_pos_gen = torch.tensor([len(all_pos)], dtype=torch.long)
         if keep_traj:
             return_data.pos_traj = pos_traj

@@ -165,7 +165,7 @@ class DistanceScoreMatch(torch.nn.Module):
             node_small = node_index.min(dim=-1)[0]
             undirected_edge_id = node_large * (node_large + 1) + node_small + edge_start
 
-            symm_noise = torch.cuda.FloatTensor(all_len, device=self.device).normal_()
+            symm_noise = torch.empty(all_len, device=self.device).normal_()
             d_noise = symm_noise[undirected_edge_id].unsqueeze(-1) # (num_edge, 1)
 
         elif self.noise_type == 'rand':

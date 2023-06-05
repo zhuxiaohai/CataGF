@@ -113,7 +113,7 @@ class GraphIsomorphismNetwork(torch.nn.Module):
                 hidden = self.activation(hidden)
             assert hidden.shape == conv_input.shape                
             if self.short_cut and hidden.shape == conv_input.shape:
-                hidden += conv_input
+                hidden = hidden + conv_input
 
             hiddens.append(hidden)
             conv_input = hidden
