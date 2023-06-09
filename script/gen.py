@@ -25,11 +25,11 @@ from rdkit.Chem.AllChem import EmbedMolecule
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='confgf')
-    parser.add_argument('--config_path', type=str, help='path of dataset', default='/home/guest/ConfGF/config/qm9_default.yml')
+    parser.add_argument('--config_path', type=str, help='path of dataset', default='/home/zhuxiaohai/PycharmProjects/CataGF/config/cata_default.yml')
     parser.add_argument('--generator', type=str, help='type of generator [ConfGF, ConfGFDist]', default='ConfGF')
-    parser.add_argument('--num_repeat', type=int, default=None, help='end idx of test generation')
+    parser.add_argument('--num_repeat', type=int, default=1, help='end idx of test generation')
     parser.add_argument('--start', type=int, default=0, help='start idx of test generation')
-    parser.add_argument('--end', type=int, default=200, help='end idx of test generation')
+    parser.add_argument('--end', type=int, default=1, help='end idx of test generation')
     parser.add_argument('--smiles', type=str, default=None, help='smiles for generation')
     parser.add_argument('--seed', type=int, default=2021, help='overwrite config seed')
 
@@ -88,11 +88,14 @@ if __name__ == '__main__':
         utils.AddHigherOrderEdges(order=config.model.order),
         utils.AddEdgeLength(),
         utils.AddPlaceHolder(),
-        utils.AddEdgeName()
+        # utils.AddEdgeName()
     ])
-    train_data = dataset.GEOMDataset(data=train_data, transform=transform)
-    val_data = dataset.GEOMDataset(data=val_data, transform=transform)
-    test_data = dataset.GEOMDataset_PackedConf(data=test_data, transform=transform)
+    # train_data = dataset.GEOMDataset(data=train_data, transform=transform)
+    # val_data = dataset.GEOMDataset(data=val_data, transform=transform)
+    # test_data = dataset.GEOMDataset_PackedConf(data=test_data, transform=transform)
+    train_data = dataset.CATADataset(data=train_data, transform=transform)
+    val_data = dataset.CATADataset(data=val_data, transform=transform)
+    test_data = dataset.CATADataset(data=test_data, transform=transform)
     print('len of test data: %d' % len(test_data))
 
     model = models.DistanceScoreMatch(config)

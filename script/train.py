@@ -15,7 +15,7 @@ from confgf import models, dataset, runner, utils
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='confgf')
-    parser.add_argument('--config_path', type=str, help='path of dataset', default='/home/guest/ConfGF/config/qm9_default.yml')
+    parser.add_argument('--config_path', type=str, help='path of dataset', default='/home/zhuxiaohai/PycharmProjects/CataGF/config/cata_default.yml')
     parser.add_argument('--seed', type=int, default=2021, help='overwrite config seed')
 
     args = parser.parse_args()
@@ -71,9 +71,12 @@ if __name__ == '__main__':
     print('loading data done!')
     
     transform = None      
-    train_data = dataset.GEOMDataset(data=train_data, transform=transform)
-    val_data = dataset.GEOMDataset(data=val_data, transform=transform)
+    # train_data = dataset.GEOMDataset(data=train_data, transform=transform)
+    # val_data = dataset.GEOMDataset(data=val_data, transform=transform)
     test_data = dataset.GEOMDataset_PackedConf(data=test_data, transform=transform)
+    train_data = dataset.CATADataset(data=train_data, transform=transform)
+    val_data = dataset.CATADataset(data=val_data, transform=transform)
+    test_data = dataset.CATADataset(data=test_data, transform=transform)
 
     model = models.DistanceScoreMatch(config)
     optimizer = utils.get_optimizer(config.train.optimizer, model)

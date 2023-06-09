@@ -20,7 +20,8 @@ class DistanceScoreMatch(torch.nn.Module):
         self.order = self.config.model.order
         self.noise_type = self.config.model.noise_type
 
-        self.node_emb = torch.nn.Embedding(100, self.hidden_dim)
+        self.node_emb = layers.MultiLayerPerceptron(58, [self.hidden_dim], activation=self.config.model.mlp_act)
+        # self.node_emb = torch.nn.Embedding(100, self.hidden_dim)
         self.edge_emb = torch.nn.Embedding(100, self.hidden_dim)
         self.input_mlp = layers.MultiLayerPerceptron(1, [self.hidden_dim, self.hidden_dim], activation=self.config.model.mlp_act)
         self.output_mlp = layers.MultiLayerPerceptron(2 * self.hidden_dim, \
@@ -51,7 +52,7 @@ class DistanceScoreMatch(torch.nn.Module):
         def binarize(x):
             return torch.where(x > 0, torch.ones_like(x), torch.zeros_like(x))
 
-        def get_higher_order_adj_matrix(adj, order):
+        def get_higher_order_adj_matrix(adj, order, ac_target):
             """
             Args:
                 adj:        (N, N)
@@ -61,7 +62,8 @@ class DistanceScoreMatch(torch.nn.Module):
                         binarize(adj + torch.eye(adj.size(0), dtype=torch.long, device=adj.device))]
 
             for i in range(2, order+1):
-                adj_mats.append(binarize(adj_mats[i-1] @ adj_mats[1]))
+                mask = torch.matmul(ac_target.unsqueeze(-1), ac_target.unsqueeze(0))
+                adj_mats.append(binarize(torch.where(mask == 1, adj_mats[i - 1] @ adj_mats[1], adj_mats[1])))
             order_mat = torch.zeros_like(adj)
 
             for i in range(1, order+1):
@@ -73,7 +75,8 @@ class DistanceScoreMatch(torch.nn.Module):
 
         N = data.num_nodes
         adj = to_dense_adj(data.edge_index).squeeze(0)
-        adj_order = get_higher_order_adj_matrix(adj, order)  # (N, N)
+        ac_target = data.ac_target
+        adj_order = get_higher_order_adj_matrix(adj, order, ac_target)  # (N, N)
 
         type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
         type_highorder = torch.where(adj_order > 1, num_types + adj_order - 1, torch.zeros_like(adj_order))
@@ -110,7 +113,8 @@ class DistanceScoreMatch(torch.nn.Module):
         Output:
             log-likelihood gradient of distance, tensor with shape (num_edge, 1)         
         """
-        node_attr = self.node_emb(data.atom_type) # (num_node, hidden)
+        # node_attr = self.node_emb(data.atom_type) # (num_node, hidden)
+        node_attr = self.node_emb(data.x) # (num_node, hidden)
         edge_attr = self.edge_emb(data.edge_type) # (num_edge, hidden)      
         d_emb = self.input_mlp(d) # (num_edge, hidden)
         edge_attr = d_emb * edge_attr # (num_edge, hidden)
@@ -182,7 +186,8 @@ class DistanceScoreMatch(torch.nn.Module):
         target = -1 / (used_sigmas ** 2) * (perturbed_d - d) # (num_edge, 1)
 
         # estimate scores
-        node_attr = self.node_emb(data.atom_type) # (num_node, hidden)
+        # node_attr = self.node_emb(data.atom_type) # (num_node, hidden)
+        node_attr = self.node_emb(data.x) # (num_node, hidden)
         edge_attr = self.edge_emb(data.edge_type) # (num_edge, hidden)
         d_emb = self.input_mlp(perturbed_d) # (num_edge, hidden)
         edge_attr = d_emb * edge_attr # (num_edge, hidden)

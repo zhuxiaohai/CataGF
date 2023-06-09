@@ -31,7 +31,7 @@ class DefaultRunner(object):
         self._optimizer = optimizer
         self._scheduler = scheduler
 
-        self.best_loss = 100.0
+        self.best_loss = 1e10
         self.start_epoch = 0
 
         if self.device.type == 'cuda':

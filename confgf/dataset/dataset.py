@@ -2,15 +2,18 @@ import os
 import pickle
 import copy
 import json
+import joblib
 from collections import defaultdict
 
 import numpy as np
+import pandas as pd
+from sklearn.preprocessing import KBinsDiscretizer, OneHotEncoder
 import random
 
 import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.transforms import Compose
-from torch_geometric.utils import to_networkx
+from torch_geometric.utils import to_networkx, to_undirected
 from torch_scatter import scatter
 #from torch.utils.data import Dataset
 
@@ -24,6 +27,18 @@ RDLogger.DisableLog('rdApp.*')
 
 from confgf import utils
 
+
+def df_to_data(node, edge, node_feature_names):
+    pos = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
+    edge_index = torch.tensor([edge['source'].tolist(),
+                               edge['target'].tolist()], dtype=torch.long)
+    x = torch.tensor(node[node_feature_names].values, dtype=torch.float)
+    edge_type = torch.tensor(edge['bond_type'].values, dtype=torch.int)
+    ac_target = torch.tensor(node['ac_target'].values, dtype=torch.float32)
+    data = Data(x=x, pos=pos, edge_index=edge_index, edge_attr=edge_type, edge_type=edge_type, ac_target=ac_target)
+    data.edge_index, data.edge_attr = to_undirected(data.edge_index, edge_attr=edge_type, reduce='add')
+    data.edge_type = data.edge_attr
+    return data
 
 def rdmol_to_data(mol:Mol, smiles=None):
     assert mol.GetNumConformers() == 1
@@ -159,7 +174,142 @@ def preprocess_iso17_dataset(base_path):
     return all_train, all_test
 
 
-    
+def preprocess_CATA_dataset(base_path, dataset_name,
+                            conf_per_mol=1, train_size=0.8, val_size=0.2, tot_mol_size=50000, seed=None):
+    """
+    base_path: directory that contains GEOM dataset
+    dataset_name: dataset name in [qm9, drugs]
+    conf_per_mol: keep mol that has at least conf_per_mol confs, and sampling the most probable conf_per_mol confs
+    train_size ratio, val = test = (1-train_size) / 2
+    tot_mol_size: max num of mols. The total number of final confs should be tot_mol_size * conf_per_mol
+    seed: rand seed for RNG
+    """
+
+    # set random seed
+    if seed is None:
+        seed = 2021
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # read summary file
+    summary_path = os.path.join(base_path, 'summary_%s.pkl' % dataset_name)
+    summ = joblib.load(summary_path)
+
+    # filter valid pickle path
+    pickle_path_list = []
+    num_mols = 0
+    num_confs = 0
+    for pickle_path in tqdm(summ):
+        num_mols += 1
+        num_confs += 1
+        pickle_path_list.append(pickle_path)
+
+    random.shuffle(pickle_path_list)
+    assert len(
+        pickle_path_list) >= tot_mol_size, 'the length of all available mols is %d, which is smaller than tot mol size %d' % (
+    len(pickle_path_list), tot_mol_size)
+
+    pickle_path_list = pickle_path_list[:tot_mol_size]
+
+    print('pre-filter: find %d molecules with %d confs, use %d molecules with %d confs' % (
+    num_mols, num_confs, tot_mol_size, tot_mol_size * conf_per_mol))
+
+    # 1. select the most probable 'conf_per_mol' confs of each 2D molecule
+    # 2. split the dataset based on 2D structure, i.e., test on unseen graphs
+    train_data, val_data, test_data = [], [], []
+
+    # generate train, val, test split indexes
+    split_indexes = list(range(tot_mol_size))
+    random.shuffle(split_indexes)
+    index2split = {}
+    for i in range(0, int(len(split_indexes) * train_size)):
+        index2split[split_indexes[i]] = 'train'
+    for i in range(int(len(split_indexes) * train_size), int(len(split_indexes) * (train_size + val_size))):
+        index2split[split_indexes[i]] = 'val'
+    for i in range(int(len(split_indexes) * (train_size + val_size)), len(split_indexes)):
+        index2split[split_indexes[i]] = 'test'
+
+    num_mols = np.zeros(4, dtype=int)  # (tot, train, val, test)
+    num_confs = np.zeros(4, dtype=int)  # (tot, train, val, test)
+
+    bad_case = 0
+
+    for i in tqdm(range(len(pickle_path_list))):
+        node_df_path = pickle_path_list[i] + '_node.csv'
+        edge_df_path = pickle_path_list[i] + '_edge.csv'
+        node = pd.read_csv(os.path.join(base_path, node_df_path))
+        edge = pd.read_csv(os.path.join(base_path, edge_df_path))
+        edge['id'] = edge['id'].astype(int)
+        edge['node1'] = edge['node1'].astype(int)
+        edge['node2'] = edge['node2'].astype(int)
+        edge['bond_type'] = (edge['bond_type'] + 1).astype(int)
+        node['id'] = node['id'].astype(int)
+        node['label'] = node['label'].astype(int)
+        node['ac_target'] = node['ac_target'].astype(float)
+        edge = edge.rename(columns={'id': 'edge_id', 'node1': 'source', 'node2': 'target'})
+        node = node.rename(columns={'id': 'node_id'})
+
+        if node['node_id'].unique().shape[0] != node.shape[0]:
+            bad_case += 1
+            continue
+        if edge[['source', 'target']].duplicated().sum() > 0:
+            bad_case += 1
+            continue
+
+        edge_feature_names = ['distance', 'bond_type']
+        node_feature_names = node.columns[7:].tolist()
+        bin_dict = {'puling_en': {'min': 0.5, 'max': 4, 'num': 10},
+                    'ionization_eng_lg': {'min': 0.5, 'max': 1.4, 'num': 9},
+                    'covalent_radius': {'min': 0.25, 'max': 2.5, 'num': 10}}
+        cate_dict = {'puling_en': [list(range(10))],
+                     'ionization_eng_lg': [list(range(9))],
+                     'covalent_radius': [list(range(10))],
+                     'unpaired_elec': [list(range(1, 9))],
+                     'valence_elec': [list(range(1, 18))],
+                     'block': [list(range(4))]}
+        expected_features_num = 10 + 9 + 10 + 8 + 17 + 4
+        final_node_feature_names = []
+        for col in node_feature_names:
+            col_bin = col
+            if col in bin_dict:
+                col_bin = col + '_bin'
+                est = KBinsDiscretizer(n_bins=bin_dict[col]['num'], encode='ordinal', strategy='uniform')
+                est.fit([[bin_dict[col]['min']], [bin_dict[col]['max']]])
+                node[col_bin] = est.transform(node[[col]].values)
+            enc = OneHotEncoder(handle_unknown='ignore', categories=cate_dict[col])
+            enc.fit(node[[col_bin]])
+            new_names = [col + '_' + str(i) for i in range(len(cate_dict[col][0]))]
+            node[new_names] = enc.transform(node[[col_bin]]).toarray()
+            final_node_feature_names += new_names
+        assert len(final_node_feature_names) == expected_features_num
+
+        data = df_to_data(node, edge, final_node_feature_names)
+        data['idx'] = torch.tensor([i], dtype=torch.long)
+        datas = [data]
+
+        if index2split[i] == 'train':
+            train_data.extend(datas)
+            num_mols += [1, 1, 0, 0]
+            num_confs += [len(datas), len(datas), 0, 0]
+        elif index2split[i] == 'val':
+            val_data.extend(datas)
+            num_mols += [1, 0, 1, 0]
+            num_confs += [len(datas), 0, len(datas), 0]
+        elif index2split[i] == 'test':
+            test_data.extend(datas)
+            num_mols += [1, 0, 0, 1]
+            num_confs += [len(datas), 0, 0, len(datas)]
+        else:
+            raise ValueError('unknown index2split value.')
+
+    print('post-filter: find %d molecules with %d confs' % (num_mols[0], num_confs[0]))
+    print('train size: %d molecules with %d confs' % (num_mols[1], num_confs[1]))
+    print('val size: %d molecules with %d confs' % (num_mols[2], num_confs[2]))
+    print('test size: %d molecules with %d confs' % (num_mols[3], num_confs[3]))
+    print('bad case: %d' % bad_case)
+    print('done!')
+
+    return train_data, val_data, test_data, index2split
 
 
 def preprocess_GEOM_dataset(base_path, dataset_name, conf_per_mol=5, train_size=0.8, tot_mol_size=50000, seed=None):
@@ -402,7 +552,30 @@ def get_GEOM_testset(base_path, dataset_name, block, tot_mol_size=200, seed=None
     return all_test_data
 
 
+class CATADataset(Dataset):
 
+    def __init__(self, data=None, transform=None):
+        super().__init__()
+        self.data = data
+        self.transform = transform
+        self.edge_types = self._edge_types()
+
+    def __getitem__(self, idx):
+
+        data = self.data[idx].clone()
+        if self.transform is not None:
+            data = self.transform(data)
+        return data
+
+    def __len__(self):
+        return len(self.data)
+
+    def _edge_types(self):
+        """All edge types."""
+        edge_types = set()
+        for graph in self.data:
+            edge_types.update(graph.edge_type.tolist())
+        return sorted(edge_types)
 
 
 class GEOMDataset(Dataset):
