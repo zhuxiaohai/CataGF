@@ -6,6 +6,58 @@ from torch_sparse import coalesce
 from confgf import utils
 
 
+class AddHigherOrderEdgesBasic(object):
+
+    def __init__(self, order, num_types=len(utils.BOND_TYPES)):
+        super().__init__()
+        self.order = order
+        self.num_types = num_types
+
+    def binarize(self, x):
+        return torch.where(x > 0, torch.ones_like(x), torch.zeros_like(x))
+
+    def get_higher_order_adj_matrix(self, adj, order):
+        """
+        Args:
+            adj:        (N, N)
+            type_mat:   (N, N)
+        """
+        adj_mats = [torch.eye(adj.size(0), dtype=torch.long, device=adj.device), \
+                    self.binarize(adj + torch.eye(adj.size(0), dtype=torch.long, device=adj.device))]
+
+        for i in range(2, order+1):
+            adj_mats.append(self.binarize(adj_mats[i-1] @ adj_mats[1]))
+        order_mat = torch.zeros_like(adj)
+
+        for i in range(1, order+1):
+            order_mat += (adj_mats[i] - adj_mats[i-1]) * i
+
+        return order_mat
+
+    def __call__(self, data: Data):
+
+
+        N = data.num_nodes
+        adj = to_dense_adj(data.edge_index).squeeze(0)
+        adj_order = self.get_higher_order_adj_matrix(adj, self.order)  # (N, N)
+
+        type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
+        type_highorder = torch.where(adj_order > 1, self.num_types + adj_order - 1, torch.zeros_like(adj_order))
+        assert (type_mat * type_highorder == 0).all()
+        type_new = type_mat + type_highorder
+
+        new_edge_index, new_edge_type = dense_to_sparse(type_new)
+        _, edge_order = dense_to_sparse(adj_order)
+
+        data.bond_edge_index = data.edge_index  # Save original edges
+        data.edge_index, data.edge_type = coalesce(new_edge_index, new_edge_type.long(), N, N) # modify data
+        edge_index_1, data.edge_order = coalesce(new_edge_index, edge_order.long(), N, N) # modify data
+        data.is_bond = (data.edge_type < self.num_types)
+        assert (data.edge_index == edge_index_1).all()
+
+        return data
+
+
 class AddHigherOrderEdges(object):
 
     def __init__(self, order, num_types=len(utils.BOND_TYPES)):
