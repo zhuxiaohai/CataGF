@@ -90,6 +90,9 @@ def df_to_data(node, edge, node_feature_names, molecule):
     ac_target = torch.tensor(node['ac_target'].values, dtype=torch.float32)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_type=edge_type, ac_target=ac_target)
     data.edge_index, data.edge_type = to_undirected(data.edge_index, edge_attr=edge_type, reduce='add')
+    G = to_networkx(data, to_undirected=True)
+    if len(list(nx.connected_components(G))) > 1:
+        return None
     data = extend_graph(data, order=2)
     data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
                                     dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
@@ -299,9 +302,11 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
         node = node.rename(columns={'id': 'node_id'})
 
         if node['node_id'].unique().shape[0] != node.shape[0]:
+            print('node ids are not unique')
             bad_case += 1
             continue
         if edge[['source', 'target']].duplicated().sum() > 0:
+            print('edges are not unique')
             bad_case += 1
             continue
 
@@ -332,6 +337,10 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
         assert len(final_node_feature_names) == expected_features_num
 
         data = df_to_data(node, edge, final_node_feature_names, molecule)
+        if data is None:
+            print('unconnected graph')
+            bad_case += 1
+            continue
         data['idx'] = torch.tensor([i], dtype=torch.long)
         datas = [data]
 
