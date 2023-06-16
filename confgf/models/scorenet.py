@@ -20,9 +20,9 @@ class DistanceScoreMatch(torch.nn.Module):
         self.order = self.config.model.order
         self.noise_type = self.config.model.noise_type
 
-        self.node_emb = layers.MultiLayerPerceptron(58, [self.hidden_dim], activation=self.config.model.mlp_act)
+        self.node_emb = layers.MultiLayerPerceptron(59, [self.hidden_dim], activation=self.config.model.mlp_act)
         # self.node_emb = torch.nn.Embedding(100, self.hidden_dim)
-        self.edge_emb = torch.nn.Embedding(100, self.hidden_dim)
+        self.edge_emb = torch.nn.Embedding(10, self.hidden_dim)
         self.input_mlp = layers.MultiLayerPerceptron(1, [self.hidden_dim, self.hidden_dim], activation=self.config.model.mlp_act)
         self.output_mlp = layers.MultiLayerPerceptron(2 * self.hidden_dim, \
                                 [self.hidden_dim, self.hidden_dim // 2, 1], activation=self.config.model.mlp_act)
@@ -135,8 +135,8 @@ class DistanceScoreMatch(torch.nn.Module):
         """
         # a workaround to get the current device, we assume all tensors in a model are on the same device.
         self.device = self.sigmas.device
-        data = self.extend_graph(data, self.order)
-        data = self.get_distance(data)
+        # data = self.extend_graph(data, self.order)
+        # data = self.get_distance(data)
 
         assert data.edge_index.size(1) == data.edge_length.size(0)
         node2graph = data.batch

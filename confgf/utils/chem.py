@@ -14,10 +14,10 @@ from rdkit.Chem.Draw import rdMolDraw2D as MD2
 from rdkit.Chem.rdmolops import RemoveHs
 from typing import List, Tuple
 
+CATA_BOND_TYPE = {'UNSPECIFIED': 0, 'FORCE': 1, ' VDW': 2}
 
-
-BOND_TYPES = {t: i for i, t in enumerate(BT.names.values())}
-BOND_NAMES = {i: t for i, t in enumerate(BT.names.keys())}
+BOND_TYPES = {t: i for i, t in enumerate(CATA_BOND_TYPE.values())}
+BOND_NAMES = {i: t for i, t in enumerate(CATA_BOND_TYPE.keys())}
 
 
 def set_conformer_positions(conf, pos):
