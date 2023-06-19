@@ -128,9 +128,9 @@ def df_to_data(node, edge, node_feature_names, molecule):
     ac_target = torch.tensor(node['ac_target'].values, dtype=torch.float32)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_type=edge_type, ac_target=ac_target)
     data.edge_index, data.edge_type = to_undirected(data.edge_index, edge_attr=edge_type, reduce='add')
-    subgraph_index, _ = subgraph(node[(node['label'] == 0) | (node['label'] == 1)].index.tolist(), edge_index)
-    G = Data(x=torch.tensor(node[(node['label'] == 0) | (node['label'] == 1)][node_feature_names].values, dtype=torch.float),
-             edge_index=subgraph_index)
+    subgraph_index, _ = subgraph(node[(node['label'] == 0) | (node['label'] == 1)]['node_id'].tolist(), data.edge_index)
+    G = Data(edge_index=subgraph_index)
+    G.num_nodes = node[(node['label'] == 0) | (node['label'] == 1)].shape[0]
     G = to_networkx(G, to_undirected=True)
     if len(list(nx.connected_components(G))) > 1:
         return None
@@ -291,8 +291,6 @@ def CATA_worker(summ, i, base_path, pickle_path_list, index2split):
     node['ac_target'] = node['ac_target'].astype(float)
     edge = edge.rename(columns={'id': 'edge_id', 'node1': 'source', 'node2': 'target'})
     node = node.rename(columns={'id': 'node_id'})
-    node = node.reset_index(drop=True)
-    edge = edge.reset_index(drop=True)
 
     if node['node_id'].unique().shape[0] != node.shape[0]:
         return [0, 0, 0, 1, 0, 0]
@@ -875,6 +873,22 @@ def get_GEOM_testset(base_path, dataset_name, block, tot_mol_size=200, seed=None
 
 
     return all_test_data
+
+
+class CATADatasetV2(Dataset):
+    def get(self, idx):
+        return torch.load(os.path.join(self.processed_dir, self.processed_file_names[idx]))
+
+    @property
+    def processed_dir(self) -> str:
+        return self.root
+
+    @property
+    def processed_file_names(self):
+        return os.listdir(self.processed_dir)
+
+    def len(self):
+        return len(self.processed_file_names)
 
 
 class CATADataset(Dataset):
