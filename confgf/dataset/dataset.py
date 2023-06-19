@@ -13,7 +13,7 @@ import random
 import torch
 from torch_geometric.data import Data, Dataset
 from torch_geometric.transforms import Compose
-from torch_geometric.utils import to_networkx, to_undirected, to_dense_adj, dense_to_sparse
+from torch_geometric.utils import to_networkx, to_undirected, to_dense_adj, dense_to_sparse, subgraph
 from torch_scatter import scatter
 from torch_sparse import coalesce
 #from torch.utils.data import Dataset
@@ -81,19 +81,60 @@ def extend_graph(data: Data, order=3):
     return data
 
 
+def add_virtual_bond(data: Data, order=2):
+    def binarize(x):
+        return torch.where(x > 0, torch.ones_like(x), torch.zeros_like(x))
+
+    def get_higher_order_adj_matrix(adj, order, ac_target):
+        """
+        Args:
+            adj:        (N, N)
+            type_mat:   (N, N)
+        """
+        mask = torch.matmul(ac_target.unsqueeze(-1), ac_target.unsqueeze(0))
+        mask = mask - torch.eye(adj.size(0), dtype=torch.long, device=adj.device)
+        return torch.where((mask == 1) & (adj == 0), torch.ones((adj.size(0), adj.size(0))) * order, adj)
+
+    num_types = len(utils.BOND_TYPES)
+    N = data.num_nodes
+    adj = to_dense_adj(data.edge_index).squeeze(0)
+    adj = binarize(adj)
+    ac_target = data.ac_target
+    adj_order = get_higher_order_adj_matrix(adj, order, ac_target)  # (N, N)
+
+    type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
+    type_highorder = torch.where(adj_order > 1, num_types + adj_order - 1, torch.zeros_like(adj_order))
+    assert (type_mat * type_highorder == 0).all()
+    type_new = type_mat + type_highorder
+
+    new_edge_index, new_edge_type = dense_to_sparse(type_new)
+    _, edge_order = dense_to_sparse(adj_order)
+
+    data.bond_edge_index = data.edge_index  # Save original edges
+    data.edge_index, data.edge_type = coalesce(new_edge_index, new_edge_type.long(), N, N) # modify data
+    edge_index_1, data.edge_order = coalesce(new_edge_index, edge_order.long(), N, N) # modify data
+    data.is_bond = (data.edge_type < num_types)
+    assert (data.edge_index == edge_index_1).all()
+
+    return data
+
+
 def df_to_data(node, edge, node_feature_names, molecule):
     pos = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
     edge_index = torch.tensor([edge['source'].tolist(),
                                edge['target'].tolist()], dtype=torch.long)
-    x = torch.tensor(node[node_feature_names].values, dtype=torch.float)
+    x = torch.tensor(node[node_feature_names].values, dtype=torch.float32)
     edge_type = torch.tensor(edge['bond_type'].values, dtype=torch.int)
     ac_target = torch.tensor(node['ac_target'].values, dtype=torch.float32)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_type=edge_type, ac_target=ac_target)
     data.edge_index, data.edge_type = to_undirected(data.edge_index, edge_attr=edge_type, reduce='add')
-    G = to_networkx(data, to_undirected=True)
+    subgraph_index, _ = subgraph(node[(node['label'] == 0) | (node['label'] == 1)].index.tolist(), edge_index)
+    G = Data(x=torch.tensor(node[(node['label'] == 0) | (node['label'] == 1)][node_feature_names].values, dtype=torch.float),
+             edge_index=subgraph_index)
+    G = to_networkx(G, to_undirected=True)
     if len(list(nx.connected_components(G))) > 1:
         return None
-    data = extend_graph(data, order=2)
+    data = add_virtual_bond(data, order=2)
     data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
                                     dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
     return data
@@ -233,6 +274,135 @@ def preprocess_iso17_dataset(base_path):
     return all_train, all_test
 
 
+def CATA_worker(summ, i, base_path, pickle_path_list, index2split):
+    file_id = summ.loc[pickle_path_list[i], 'extxyz_id']
+    molecule_id = summ.loc[pickle_path_list[i], 'data_id']
+    file_path = str(file_id) + '.extxyz'
+    molecule_path = str(file_id) + '-' + str(molecule_id) + '.csv'
+    molecule = read(os.path.join(base_path, file_path), molecule_id)
+    node = pd.read_csv(os.path.join(base_path, 'node', molecule_path))
+    edge = pd.read_csv(os.path.join(base_path, 'edge', molecule_path))
+    edge['id'] = edge['id'].astype(int)
+    edge['node1'] = edge['node1'].astype(int)
+    edge['node2'] = edge['node2'].astype(int)
+    edge['bond_type'] = (edge['bond_type'] + 1).astype(int)
+    node['id'] = node['id'].astype(int)
+    node['label'] = node['label'].astype(int)
+    node['ac_target'] = node['ac_target'].astype(float)
+    edge = edge.rename(columns={'id': 'edge_id', 'node1': 'source', 'node2': 'target'})
+    node = node.rename(columns={'id': 'node_id'})
+    node = node.reset_index(drop=True)
+    edge = edge.reset_index(drop=True)
+
+    if node['node_id'].unique().shape[0] != node.shape[0]:
+        return [0, 0, 0, 1, 0, 0]
+    if edge[['source', 'target']].duplicated().sum() > 0:
+        return [0, 0, 0, 0, 1, 0]
+
+    bin_dict = {'puling_en': {'min': 0.5, 'max': 4, 'num': 10},
+                'ionization_eng_lg': {'min': 0.5, 'max': 1.4, 'num': 9},
+                'covalent_radius': {'min': 0.25, 'max': 2.5, 'num': 10}}
+    cate_dict = {'puling_en': [list(range(10))],
+                 'ionization_eng_lg': [list(range(9))],
+                 'covalent_radius': [list(range(10))],
+                 'unpaired_elec': [list(range(9))],
+                 'valence_elec': [list(range(1, 18))],
+                 'block': [list(range(4))]}
+    node_feature_names = list(cate_dict.keys())
+    expected_features_num = 10 + 9 + 10 + 9 + 17 + 4
+    final_node_feature_names = []
+    for col in node_feature_names:
+        col_bin = col
+        if col in bin_dict:
+            col_bin = col + '_bin'
+            est = KBinsDiscretizer(n_bins=bin_dict[col]['num'], encode='ordinal', strategy='uniform')
+            est.fit([[bin_dict[col]['min']], [bin_dict[col]['max']]])
+            node[col_bin] = est.transform(node[[col]].values)
+        enc = OneHotEncoder(handle_unknown='ignore', categories=cate_dict[col])
+        enc.fit(node[[col_bin]])
+        new_names = [col + '_' + str(i) for i in range(len(cate_dict[col][0]))]
+        node[new_names] = enc.transform(node[[col_bin]]).toarray()
+        final_node_feature_names += new_names
+    assert len(final_node_feature_names) == expected_features_num
+
+    data = df_to_data(node, edge, final_node_feature_names, molecule)
+    if data is None:
+        joblib.dump(i, os.path.join(base_path, 'error', '{}_{}.pkl'.format(file_id, molecule_id)))
+        return [0, 0, 0, 0, 0, 1]
+    data['idx'] = torch.tensor([i], dtype=torch.long)
+    destFilePath = os.path.join(base_path, index2split[i], '{}_{}.pt'.format(file_id, molecule_id))
+    torch.save(data, destFilePath)
+    if index2split[i] == 'train':
+        return [1, 0, 0, 0, 0, 0]
+    elif index2split[i] == 'val':
+        return [0, 1, 0, 0, 0, 0]
+    else:
+        return [0, 0, 1, 0, 0, 0]
+
+def preprocess_CATA_dataset_mp(base_path, train_size=0.8, val_size=0.2, tot_mol_size=5000, n_jobs=4, seed=None):
+    """
+    base_path: directory that contains GEOM dataset
+    conf_per_mol: keep mol that has at least conf_per_mol confs, and sampling the most probable conf_per_mol confs
+    train_size ratio, val = test = (1-train_size) / 2
+    seed: rand seed for RNG
+    """
+
+    # set random seed
+    if seed is None:
+        seed = 2021
+    np.random.seed(seed)
+    random.seed(seed)
+
+    # read summary file
+    summary_path = os.path.join(base_path, 'summary', 'summary.csv')
+    summ = pd.read_csv(summary_path)
+    summ = summ[summ['error'] == 1]
+    summ['id'] = summ['id'].astype(int)
+    summ['extxyz_id'] = summ['extxyz_id'].astype(int)
+    summ['data_id'] = summ['data_id'].astype(int)
+    summ = summ.set_index('id', drop=True).head(4)
+
+    # filter valid pickle path
+    pickle_path_list = summ.index.tolist()
+    random.shuffle(pickle_path_list)
+    print('pre-filter: find %d confs' % len(pickle_path_list))
+    pickle_path_list = pickle_path_list[:tot_mol_size]
+    print('but use %d confs' % len(pickle_path_list))
+
+    # generate train, val, test split indexes
+    split_indexes = list(range(tot_mol_size))
+    random.shuffle(split_indexes)
+    index2split = {}
+    for i in range(0, int(tot_mol_size * train_size)):
+        index2split[split_indexes[i]] = 'train'
+    for i in range(int(tot_mol_size * train_size), int(tot_mol_size * (train_size + val_size))):
+        index2split[split_indexes[i]] = 'val'
+    for i in range(int(tot_mol_size * (train_size + val_size)), tot_mol_size):
+        index2split[split_indexes[i]] = 'test'
+
+    if not os.path.exists(os.path.join(base_path, 'train')):
+        os.makedirs(os.path.join(base_path, 'train'))
+    if not os.path.exists(os.path.join(base_path, 'val')):
+        os.makedirs(os.path.join(base_path, 'val'))
+    if not os.path.exists(os.path.join(base_path, 'test')):
+        os.makedirs(os.path.join(base_path, 'test'))
+    if not os.path.exists(os.path.join(base_path, 'error')):
+        os.makedirs(os.path.join(base_path, 'error'))
+
+    result = joblib.Parallel(n_jobs=n_jobs)(joblib.delayed(CATA_worker)(summ, i, base_path, pickle_path_list, index2split)
+                                   for i in tqdm(range(len(pickle_path_list))))
+
+    result = np.array(result)
+    print('post-filter: find %d confs' % (result.shape[0]))
+    print('train size: %d confs' % (result[:, 0].sum()))
+    print('val size: %d confs' % (result[:, 1].sum()))
+    print('test size: %d confs' % (result[:, 2].sum()))
+    print('node index error: %d confs' % (result[:, 3].sum()))
+    print('edge index error: %d confs' % (result[:, 4].sum()))
+    print('connection error: %d confs' % (result[:, 5].sum()))
+    print('done!')
+
+
 def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_size=5000, seed=None):
     """
     base_path: directory that contains GEOM dataset
@@ -302,11 +472,11 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
         node = node.rename(columns={'id': 'node_id'})
 
         if node['node_id'].unique().shape[0] != node.shape[0]:
-            print('node ids are not unique')
+            # print('node ids are not unique')
             bad_case += 1
             continue
         if edge[['source', 'target']].duplicated().sum() > 0:
-            print('edges are not unique')
+            # print('edges are not unique')
             bad_case += 1
             continue
 
@@ -338,7 +508,7 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
 
         data = df_to_data(node, edge, final_node_feature_names, molecule)
         if data is None:
-            print('unconnected graph')
+            # print('unconnected graph')
             bad_case += 1
             continue
         data['idx'] = torch.tensor([i], dtype=torch.long)
