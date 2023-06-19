@@ -16,30 +16,22 @@ class AddVirtualEdges(object):
     def binarize(self, x):
         return torch.where(x > 0, torch.ones_like(x), torch.zeros_like(x))
 
-    def get_higher_order_adj_matrix(self, adj, order):
+    def get_higher_order_adj_matrix(self, adj, order, ac_target):
         """
         Args:
             adj:        (N, N)
             type_mat:   (N, N)
         """
-        adj_mats = [torch.eye(adj.size(0), dtype=torch.long, device=adj.device), \
-                    self.binarize(adj + torch.eye(adj.size(0), dtype=torch.long, device=adj.device))]
-
-        for i in range(2, order+1):
-            adj_mats.append(self.binarize(adj_mats[i-1] @ adj_mats[1]))
-        order_mat = torch.zeros_like(adj)
-
-        for i in range(1, order+1):
-            order_mat += (adj_mats[i] - adj_mats[i-1]) * i
-
-        return order_mat
+        mask = torch.matmul(ac_target.unsqueeze(-1), ac_target.unsqueeze(0))
+        return torch.where((mask == 1) & (adj == 0), torch.ones((adj.size(0), adj.size(0))) * order, adj)
 
     def __call__(self, data: Data):
 
-
         N = data.num_nodes
         adj = to_dense_adj(data.edge_index).squeeze(0)
-        adj_order = self.get_higher_order_adj_matrix(adj, self.order)  # (N, N)
+        adj = self.binarize(adj)
+        ac_target = data.ac_target
+        adj_order = self.get_higher_order_adj_matrix(adj, self.order, ac_target)  # (N, N)
 
         type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
         type_highorder = torch.where(adj_order > 1, self.num_types + adj_order - 1, torch.zeros_like(adj_order))
