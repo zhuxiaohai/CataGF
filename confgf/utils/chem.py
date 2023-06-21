@@ -46,6 +46,15 @@ def update_data_pos_from_rdmol(data):
     data.pos = new_pos
     return data
 
+def set_asemol_positions(ase_mol, pos):
+    """
+    Args:
+        rdkit_mol:  An `rdkit.Chem.rdchem.Mol` object.
+        pos: (N_atoms, 3)
+    """
+    mol = copy.deepcopy(ase_mol)
+    mol.set_positions(pos.tolist())
+    return mol
 
 def set_rdmol_positions(rdkit_mol, pos):
     """

@@ -5,8 +5,41 @@ import torch
 from torch_geometric.data import Data
 from rdkit import Chem
 from rdkit.Chem.rdForceFieldHelpers import MMFFOptimizeMolecule
+from dscribe.descriptors import MBTR
 
 from confgf import utils
+
+
+def get_fp_simularity(data: Data, threshold=0.5):
+    data.pos_ref = data.pos_ref.view(-1, data.num_nodes, 3)
+    data.pos_gen = data.pos_gen.view(-1, data.num_nodes, 3)
+    num_gen = data.pos_gen.size(0)
+    num_ref = data.pos_ref.size(0)
+
+    assert num_gen == data.num_pos_gen.item()
+    assert num_ref == data.num_pos_ref.item()
+    atom_types = list(set(data.atom_type.tolist()))
+
+    mbtr = MBTR(species=np.sort(atom_types),
+                geometry={"function": "inverse_distance"},
+                grid={"min": 0, "max": 1, "n": 100, "sigma": 0.1},
+                weighting={"function": "exp", "scale": 0.5, "threshold": 1e-3},
+                periodic=True,
+                sparse=False,
+                normalization="l2")
+
+    rmsd_confusion_mat = -1 * np.ones([num_ref, num_gen], dtype=np.float)
+
+    for i in range(num_gen):
+        gen_mol = utils.set_asemol_positions(data.asemol[data.ac_target == 1], data.pos_gen[i][data.ac_target == 1])
+        gen_fp = mbtr.create(system=gen_mol, n_jobs=1, only_physical_cores=False)
+        for j in range(num_ref):
+            ref_mol = utils.set_asemol_positions(data.asemol[data.ac_target == 1], data.pos_ref[j][data.ac_target == 1])
+            ref_fp = mbtr.create(system=ref_mol, n_jobs=1, only_physical_cores=False)
+            rmsd_confusion_mat[j, i] = np.sqrt(np.sum((gen_fp - ref_fp)**2))
+    rmsd_ref_min = rmsd_confusion_mat.min(-1)
+
+    return (rmsd_ref_min <= threshold).mean(), rmsd_ref_min.mean()
 
 
 def get_rmsd_confusion_matrix(data: Data, useFF=False):

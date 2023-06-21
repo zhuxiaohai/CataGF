@@ -24,6 +24,7 @@ from rdkit.Chem.rdchem import Mol, HybridizationType, BondType
 from rdkit import RDLogger
 
 from ase.io import read
+from ase import Atom, Atoms
 
 import networkx as nx
 from tqdm import tqdm
@@ -119,7 +120,7 @@ def add_virtual_bond(data: Data, order=2):
     return data
 
 
-def df_to_data(node, edge, node_feature_names, molecule):
+def df_to_data(node, edge, node_feature_names, molecule, test=False):
     pos = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
     edge_index = torch.tensor([edge['source'].tolist(),
                                edge['target'].tolist()], dtype=torch.long)
@@ -134,10 +135,31 @@ def df_to_data(node, edge, node_feature_names, molecule):
     G = to_networkx(G, to_undirected=True)
     if len(list(nx.connected_components(G))) > 1:
         return None
-    data = add_virtual_bond(data, order=2)
-    data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
+    try:
+        data = add_virtual_bond(data, order=2)
+    except:
+        return None
+    try:
+        data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
                                     dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
+    except:
+        return None
+    if test:
+        ase_mol = df_to_ase_mol(molecule.get_cell(), node)
+        data.ase_mol = copy.deepcopy(ase_mol)
+        data.atom_type = torch.tensor(node['atomic_number'].values, dtype=torch.long)
+        data.num_pos_ref = torch.tensor([1], dtype=torch.long)
     return data
+
+
+def df_to_ase_mol(cell, node):
+    atoms = []
+    for i in range(node.shape[0]):
+        atom = Atom(node['atomic_number'].iloc[i],
+                    position=node[['x', 'y', 'z']].iloc[i].tolist())
+        atoms.append(atom)
+    mol = Atoms(atoms, cell=cell, pbc=True)
+    return mol
 
 
 def rdmol_to_data(mol:Mol, smiles=None):
@@ -554,11 +576,10 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
     # read summary file
     summary_path = os.path.join(base_path, 'summary', 'summary.csv')
     summ = pd.read_csv(summary_path)
-    summ = summ[summ['error'] == 1]
     summ['id'] = summ['id'].astype(int)
     summ['extxyz_id'] = summ['extxyz_id'].astype(int)
     summ['data_id'] = summ['data_id'].astype(int)
-    summ = summ.set_index('id', drop=True).head(4)
+    summ = summ.set_index('id', drop=True)
 
     # filter valid pickle path
     pickle_path_list = summ.index.tolist()
@@ -623,7 +644,17 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
             final_node_feature_names += new_names
         assert len(final_node_feature_names) == expected_features_num
 
-        data = df_to_data(node, edge, final_node_feature_names, molecule)
+        data = df_to_data(node, edge, final_node_feature_names, molecule, test=True)
+        if data is None:
+            bad_case += 1
+            continue
+        node_ref = pd.read_csv(os.path.join(base_path, 'final_node', molecule_path))
+        node_ref['id'] = node_ref['id'].astype(int)
+        node_ref = node_ref.rename(columns={'id': 'node_id'})
+        if not (node['node_id'] == node_ref['node_id']).all():
+            bad_case += 1
+            continue
+        data.pos_ref = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
         data['idx'] = torch.tensor([i], dtype=torch.long)
         datas = [data]
         test_data.extend(datas)

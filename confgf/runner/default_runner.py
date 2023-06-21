@@ -248,6 +248,8 @@ class DefaultRunner(object):
 
                 noise = torch.randn_like(pos) * torch.sqrt(step_size * 2)
                 score_d = scorenet.get_score(data, d, sigma) # (num_edge, 1)
+                score_d = torch.where(data.bond_type > len(utils.BOND_TYPES),
+                                      score_d, torch.zeros_like(score_d, dtype=score_d.dtype))
                 score_pos = self.convert_score_d(score_d, pos, data.edge_index, d)
                 score_pos = utils.clip_norm(score_pos, limit=clip)
 
@@ -257,6 +259,7 @@ class DefaultRunner(object):
         pos_vecs = torch.stack(pos_vecs, dim=0).view(cnt_sigma, n_steps_each, -1, 3) # (sigams, 100, num_node, 3)
         
         return data, pos_vecs
+
 
     def ConfGF_generator(self, data, config, pos_init=None):
 
@@ -268,7 +271,7 @@ class DefaultRunner(object):
         """
 
         if pos_init is None:
-            pos_init = torch.randn(data.num_nodes, 3).to(data.pos)
+            pos_init = data.pos
         data, pos_traj = self.position_Langevin_Dynamics(data, pos_init, self._model, self._model.sigmas.data.clone(), \
                                             n_steps_each=config.steps_pos, step_lr=config.step_lr_pos, \
                                             clip=config.clip, min_sigma=config.min_sigma)
@@ -396,5 +399,4 @@ class DefaultRunner(object):
         print('pos generation[%d-%d] done  |  Time: %.5f' % (start, end, time() - generate_start))  
 
         return all_data_list
-
 
