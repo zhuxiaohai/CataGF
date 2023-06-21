@@ -1,7 +1,7 @@
 train:
-  batch_size: 1
+  batch_size: 128
   seed: 2021
-  epochs: 10
+  epochs: 283
   shuffle: true
   resume_train: false
   eval: true
@@ -33,7 +33,7 @@ train:
 test:
   init_checkpoint: /home/zhuxiaohai/confgf_train/cata
   output_path: /home/zhuxiaohai/confgf_test
-  epoch: 3
+  epoch: 106
   gen:
     dg_step_size: 3.0
     dg_num_steps: 1000  
@@ -49,9 +49,9 @@ test:
 data:
   base_path: /home/zhuxiaohai/confgf_data/CATA
   dataset: CATA
-  train_set: train_data_0k.pkl
-  val_set: val_data_0k.pkl
-  test_set: test_data_0k.pkl
+  train_set: train_data_110k.pkl
+  val_set: val_data_27k.pkl
+  test_set: test_data_11.pkl
 
 
 model:
@@ -61,7 +61,7 @@ model:
   sigma_begin: 10
   sigma_end: 0.01
   num_noise_level: 50
-  order: 3
+  order: 2
   mlp_act: relu
   gnn_act: relu
   cutoff: 10.0

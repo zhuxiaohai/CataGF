@@ -101,9 +101,17 @@ def add_virtual_bond(data: Data, order=2):
     adj = to_dense_adj(data.edge_index).squeeze(0)
     adj = binarize(adj)
     ac_target = data.ac_target
+    adj_dim = adj.size(0)
+    atom_num = ac_target.size(0)
+    if atom_num > adj_dim:
+        expand_num = atom_num - adj_dim
+        adj = torch.nn.ZeroPad2d((0, expand_num, 0, expand_num))(adj)
     adj_order = get_higher_order_adj_matrix(adj, order, ac_target)  # (N, N)
 
     type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
+    if atom_num > adj_dim:
+        expand_num = atom_num - adj_dim
+        type_mat = torch.nn.ZeroPad2d((0, expand_num, 0, expand_num))(type_mat)
     type_highorder = torch.where(adj_order > 1, num_types + adj_order - 1, torch.zeros_like(adj_order))
     assert (type_mat * type_highorder == 0).all()
     type_new = type_mat + type_highorder
@@ -129,27 +137,31 @@ def df_to_data(node, edge, node_feature_names, molecule, test=False):
     ac_target = torch.tensor(node['ac_target'].values, dtype=torch.float32)
     data = Data(x=x, pos=pos, edge_index=edge_index, edge_type=edge_type, ac_target=ac_target)
     data.edge_index, data.edge_type = to_undirected(data.edge_index, edge_attr=edge_type, reduce='add')
-    subgraph_index, _ = subgraph(node[(node['label'] == 0) | (node['label'] == 1)]['node_id'].tolist(), data.edge_index)
-    G = Data(edge_index=subgraph_index)
-    G.num_nodes = node[(node['label'] == 0) | (node['label'] == 1)].shape[0]
-    G = to_networkx(G, to_undirected=True)
+    try:
+        subgraph_index, _ = subgraph(node[(node['label'] == 0) | (node['label'] == 1)]['node_id'].tolist(), data.edge_index)
+        G = Data(edge_index=subgraph_index)
+        G.num_nodes = node[(node['label'] == 0) | (node['label'] == 1)].shape[0]
+        G = to_networkx(G, to_undirected=True)
+    except:
+        return None, 'isolation atom in body'
     if len(list(nx.connected_components(G))) > 1:
-        return None
+        return None, 'body components > 1'
     try:
         data = add_virtual_bond(data, order=2)
     except:
-        return None
+        return None, 'add virtual bond error'
     try:
         data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
                                     dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
     except:
-        return None
+        return None, 'ase get distances error'
     if test:
         ase_mol = df_to_ase_mol(molecule.get_cell(), node)
         data.ase_mol = copy.deepcopy(ase_mol)
         data.atom_type = torch.tensor(node['atomic_number'].values, dtype=torch.long)
         data.num_pos_ref = torch.tensor([1], dtype=torch.long)
-    return data
+        data.label = torch.tensor(node['label'].values, dtype=torch.float32)
+    return data, 'None'
 
 
 def df_to_ase_mol(cell, node):
@@ -380,7 +392,7 @@ def preprocess_CATA_dataset_mp(base_path, train_size=0.8, val_size=0.2, tot_mol_
     summ['id'] = summ['id'].astype(int)
     summ['extxyz_id'] = summ['extxyz_id'].astype(int)
     summ['data_id'] = summ['data_id'].astype(int)
-    summ = summ.set_index('id', drop=True).head(4)
+    summ = summ.set_index('id', drop=True)
 
     # filter valid pickle path
     pickle_path_list = summ.index.tolist()
@@ -444,7 +456,7 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
     summ['id'] = summ['id'].astype(int)
     summ['extxyz_id'] = summ['extxyz_id'].astype(int)
     summ['data_id'] = summ['data_id'].astype(int)
-    summ = summ.set_index('id', drop=True).head(4)
+    summ = summ.set_index('id', drop=True)
 
     # filter valid pickle path
     pickle_path_list = summ.index.tolist()
@@ -471,7 +483,7 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
     num_mols = np.zeros(4, dtype=int)  # (tot, train, val, test)
     num_confs = np.zeros(4, dtype=int)  # (tot, train, val, test)
 
-    bad_case = 0
+    error = {}
 
     for i in tqdm(range(len(pickle_path_list))):
         file_id = summ.loc[pickle_path_list[i], 'extxyz_id']
@@ -492,12 +504,10 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
         node = node.rename(columns={'id': 'node_id'})
 
         if node['node_id'].unique().shape[0] != node.shape[0]:
-            # print('node ids are not unique')
-            bad_case += 1
+            error['node index error'] = error.get('node index error', 0) + 1
             continue
         if edge[['source', 'target']].duplicated().sum() > 0:
-            # print('edges are not unique')
-            bad_case += 1
+            error['edge index error'] = error.get('edge index error', 0) + 1
             continue
 
         bin_dict = {'puling_en': {'min': 0.5, 'max': 4, 'num': 10},
@@ -526,10 +536,9 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
             final_node_feature_names += new_names
         assert len(final_node_feature_names) == expected_features_num
 
-        data = df_to_data(node, edge, final_node_feature_names, molecule)
+        data, conversion_error_type = df_to_data(node, edge, final_node_feature_names, molecule)
         if data is None:
-            # print('unconnected graph')
-            bad_case += 1
+            error[conversion_error_type] = error.get(conversion_error_type, 0) + 1
             continue
         data['idx'] = torch.tensor([i], dtype=torch.long)
         datas = [data]
@@ -553,7 +562,7 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
     print('train size: %d molecules with %d confs' % (num_mols[1], num_confs[1]))
     print('val size: %d molecules with %d confs' % (num_mols[2], num_confs[2]))
     print('test size: %d molecules with %d confs' % (num_mols[3], num_confs[3]))
-    print('bad case: %d' % bad_case)
+    print('bad case: \n', error)
     print('done!')
 
     return train_data, val_data, test_data, index2split
@@ -589,6 +598,7 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
     print('but use %d confs' % len(pickle_path_list))
 
     test_data = []
+    name_list = []
 
     bad_case = 0
 
@@ -658,12 +668,13 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
         data['idx'] = torch.tensor([i], dtype=torch.long)
         datas = [data]
         test_data.extend(datas)
+        name_list.append((file_path, molecule_path))
 
     print('test size: %d confs' % len(test_data))
     print('bad case: %d' % bad_case)
     print('done!')
 
-    return test_data
+    return test_data, name_list
 
 
 def preprocess_GEOM_dataset(base_path, dataset_name, conf_per_mol=5, train_size=0.8, tot_mol_size=50000, seed=None):

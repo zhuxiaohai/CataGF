@@ -27,7 +27,7 @@ if __name__ == '__main__':
         config.train.seed = args.seed
 
     if config.train.save and config.train.save_path is not None:
-        config.train.save_path = os.path.join(config.train.save_path, config.model.name)
+        config.train.save_path = os.path.join(config.train.save_path, config.model.name, 'v2')
         if not os.path.exists(config.train.save_path):
             os.makedirs(config.train.save_path)
 

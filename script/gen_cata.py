@@ -29,7 +29,7 @@ if __name__ == '__main__':
     parser.add_argument('--generator', type=str, help='type of generator [ConfGF, ConfGFDist]', default='ConfGF')
     parser.add_argument('--num_repeat', type=int, default=1, help='end idx of test generation')
     parser.add_argument('--start', type=int, default=0, help='start idx of test generation')
-    parser.add_argument('--end', type=int, default=1, help='end idx of test generation')
+    parser.add_argument('--end', type=int, default=100, help='end idx of test generation')
     parser.add_argument('--seed', type=int, default=2021, help='overwrite config seed')
 
     args = parser.parse_args()

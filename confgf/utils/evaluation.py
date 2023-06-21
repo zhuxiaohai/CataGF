@@ -20,26 +20,39 @@ def get_fp_simularity(data: Data, threshold=0.5):
     assert num_ref == data.num_pos_ref.item()
     atom_types = list(set(data.atom_type.tolist()))
 
+    # mbtr = MBTR(species=np.sort(atom_types),
+    #             geometry={"function": "inverse_distance"},
+    #             grid={"min": 0, "max": 1, "n": 100, "sigma": 0.1},
+    #             weighting={"function": "exp", "scale": 0.5, "threshold": 1e-3},
+    #             periodic=True,
+    #             sparse=False,
+    #             normalization="l2")
+
     mbtr = MBTR(species=np.sort(atom_types),
-                geometry={"function": "inverse_distance"},
-                grid={"min": 0, "max": 1, "n": 100, "sigma": 0.1},
-                weighting={"function": "exp", "scale": 0.5, "threshold": 1e-3},
-                periodic=True,
-                sparse=False,
-                normalization="l2")
+                k1={"geometry": {"function": "atomic_number"}, "grid": {"min": 1, "max": 86, "sigma": 0.1, "n": 86}, },
+                k2={"geometry": {"function": "distance"}, "grid": {"min": 0.0, "max": 5.0, "sigma": 0.1, "n": 100},
+                    "weighting": {"function": "inverse_square", "r_cut": 4.0, "scale": 0.5, "threshold": 1e-3}, },
+                k3={"geometry": {"function": "cosine"}, "grid": {"min": -1.0, "max": 1.0, "sigma": 0.1, "n": 100},
+                    "weighting": {"function": "exp", "r_cut": 3.0, "scale": 0.3, "threshold": 1e-3}, }, periodic=True,
+                sparse=False, flatten=True,
+                normalization="l2_each")
 
     rmsd_confusion_mat = -1 * np.ones([num_ref, num_gen], dtype=np.float)
 
     for i in range(num_gen):
-        gen_mol = utils.set_asemol_positions(data.asemol[data.ac_target == 1], data.pos_gen[i][data.ac_target == 1])
+        gen_mol = utils.set_asemol_positions(data.ase_mol[data.ac_target == 1], data.pos_gen[i][data.ac_target == 1])
         gen_fp = mbtr.create(system=gen_mol, n_jobs=1, only_physical_cores=False)
         for j in range(num_ref):
-            ref_mol = utils.set_asemol_positions(data.asemol[data.ac_target == 1], data.pos_ref[j][data.ac_target == 1])
+            ref_mol = utils.set_asemol_positions(data.ase_mol[data.ac_target == 1], data.pos_ref[j][data.ac_target == 1])
             ref_fp = mbtr.create(system=ref_mol, n_jobs=1, only_physical_cores=False)
-            rmsd_confusion_mat[j, i] = np.sqrt(np.sum((gen_fp - ref_fp)**2))
+            cos_sim = gen_fp.dot(ref_fp) / (np.linalg.norm(gen_fp) * np.linalg.norm(ref_fp))
+            rmsd_confusion_mat[j, i] = cos_sim
+            # rmsd_confusion_mat[j, i] = np.sqrt(np.sum((gen_fp - ref_fp)**2))
+            gen_mol_output = utils.set_asemol_positions(data.ase_mol, data.pos_gen[i])
+            ref_mol_output = utils.set_asemol_positions(data.ase_mol, data.pos_ref[j])
     rmsd_ref_min = rmsd_confusion_mat.min(-1)
 
-    return (rmsd_ref_min <= threshold).mean(), rmsd_ref_min.mean()
+    return (rmsd_ref_min <= threshold).mean(), rmsd_ref_min.mean(), gen_mol_output, ref_mol_output
 
 
 def get_rmsd_confusion_matrix(data: Data, useFF=False):

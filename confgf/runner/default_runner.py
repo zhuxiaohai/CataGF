@@ -248,12 +248,10 @@ class DefaultRunner(object):
 
                 noise = torch.randn_like(pos) * torch.sqrt(step_size * 2)
                 score_d = scorenet.get_score(data, d, sigma) # (num_edge, 1)
-                score_d = torch.where(data.bond_type > len(utils.BOND_TYPES),
-                                      score_d, torch.zeros_like(score_d, dtype=score_d.dtype))
                 score_pos = self.convert_score_d(score_d, pos, data.edge_index, d)
                 score_pos = utils.clip_norm(score_pos, limit=clip)
-
-                pos = pos + step_size * score_pos + noise # (num_node, 3)
+                # pos = pos + step_size * score_pos + noise
+                pos = torch.where(data.label.unsqueeze(-1) == 2, pos + step_size * score_pos + noise, pos)  # (num_node, 3)
                 pos_vecs.append(pos)
 
         pos_vecs = torch.stack(pos_vecs, dim=0).view(cnt_sigma, n_steps_each, -1, 3) # (sigams, 100, num_node, 3)
