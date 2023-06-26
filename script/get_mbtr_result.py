@@ -1,5 +1,6 @@
 #coding: utf-8
 
+import os
 from time import time
 from tqdm import tqdm
 import argparse
@@ -12,17 +13,34 @@ import multiprocessing
 from functools import partial
 
 
+def metric_func(x, threshold, base_path):
+    try:
+        result = utils.get_fp_simularity(x, threshold)
+        write(os.path.join(base_path, 'cif', 'gen-{}-{}.cif'.format(x.file_id.item(), x.molecule_id.item())), result[2])
+        write(os.path.join(base_path, 'cif', 'ref-{}-{}.cif'.format(x.file_id.item(), x.molecule_id.item())), result[3])
+        return result[:2]
+    except:
+        return (np.nan, np.nan)
+
+
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='confgf')
-    parser.add_argument('--input', type=str, default='/home/zhuxiaohai/confgf_test/cata/ConfGF_s0e100epoch106min_sig0.000.pkl')
-    parser.add_argument('--core', type=int, default=6)
-    parser.add_argument('--threshold', type=float, default=1, help='threshold of COV score')
+    parser.add_argument('--base_path', type=str, default='/home/zhuxiaohai/confgf_test/cata')
+    parser.add_argument('--input', type=str, default='ConfGF_s0e200epoch106min_sig0.000.pkl')
+    parser.add_argument('--core', type=int, default=4)
+    parser.add_argument('--threshold', type=float, default=0.5, help='threshold of COV score')
 
     args = parser.parse_args()
     print(args)
+    if not os.path.exists(os.path.join(args.base_path, 'cif')):
+        os.makedirs(os.path.join(args.base_path, 'cif'))
+    else:
+        for f in os.listdir(os.path.join(args.base_path, 'cif')):
+            file_path = os.path.join(os.path.join(args.base_path, 'cif'), f)
+            os.remove(file_path)
 
-    with open(args.input, 'rb') as fin:
+    with open(os.path.join(args.base_path, args.input), 'rb') as fin:
         filtered_data_list = pickle.load(fin)
 
     cnt_conf = 0
@@ -30,30 +48,31 @@ if __name__ == '__main__':
         cnt_conf += filtered_data_list[i].num_pos_ref.item()
     print('use %d mols with total %d confs' % (len(filtered_data_list), cnt_conf))
 
-    # pool = multiprocessing.Pool(args.core)
-    # func = partial(utils.get_fp_simularity, threshold=args.threshold)
+    pool = multiprocessing.Pool(args.core)
+    func = partial(metric_func, threshold=args.threshold, base_path=args.base_path)
 
     covs = []
     mats = []
-    error_count = 0
-    for i in range(len(filtered_data_list)):
-        try:
-            result = utils.get_fp_simularity(filtered_data_list[i], args.threshold)
-            write('/home/zhuxiaohai/confgf_test/cata/gen-{}.cif'.format(i), result[2])
-            write('/home/zhuxiaohai/confgf_test/cata/ref-{}.cif'.format(i), result[3])
-        except:
-            error_count += 1
-            result = (np.nan, np.nan)
-        covs.append(result[0])
-        mats.append(result[1])
-    print(error_count)
-    # for result in tqdm(pool.imap(func, filtered_data_list), total=len(filtered_data_list)):
+    # error_count = 0
+    # for i in range(len(filtered_data_list)):
+    #     try:
+    #         result = utils.get_fp_simularity(filtered_data_list[i], args.threshold)
+    #         write('/home/zhuxiaohai/confgf_test/cata/cif/gen-{}.cif'.format(i), result[2])
+    #         write('/home/zhuxiaohai/confgf_test/cata/cif/ref-{}.cif'.format(i), result[3])
+    #     except:
+    #         error_count += 1
+    #         result = (np.nan, np.nan)
     #     covs.append(result[0])
     #     mats.append(result[1])
+    # print(error_count)
+    for result in tqdm(pool.imap(func, filtered_data_list), total=len(filtered_data_list)):
+        covs.append(result[0])
+        mats.append(result[1])
     covs = np.array(covs)
     mats = np.array(mats)
 
     print('Coverage Mean: %.4f | Coverage Median: %.4f | Match Mean: %.4f | Match Median: %.4f' % \
-                        (covs.mean(), np.median(covs), mats[~np.isnan(mats)].mean(), np.median(mats[~np.isnan(mats)])))
-    # pool.close()
-    # pool.join()
+          (covs[~np.isnan(covs)].mean(), np.median(covs[~np.isnan(covs)]),
+           mats[~np.isnan(mats)].mean(), np.median(mats[~np.isnan(mats)])))
+    pool.close()
+    pool.join()

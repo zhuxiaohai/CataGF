@@ -5,6 +5,7 @@ import os
 import numpy as np
 import pickle
 import copy
+import logging
 
 import rdkit
 from rdkit import Chem
@@ -356,6 +357,11 @@ class DefaultRunner(object):
 
 
     def generate_samples_from_testset(self, start, end, generator, num_repeat=None, out_path=None):
+        logging.basicConfig(
+            filename=os.path.join(out_path, 'error.log'),
+            filemode='w',
+            format='%(message)s',
+            level=logging.INFO)
         
         test_set = self.test_set
 
@@ -371,15 +377,18 @@ class DefaultRunner(object):
             num_repeat_ = num_repeat if num_repeat is not None else 2 * test_set[i].num_pos_ref.item()
             batch = utils.repeat_data(test_set[i], num_repeat_).to(self.device)
 
-            if generator == 'ConfGF':
-                _, _, batch, _ = self.ConfGF_generator(batch, self.config.test.gen)
-            elif generator == 'ConfGFDist':
-                embedder = utils.Embed3D(step_size=self.config.test.gen.dg_step_size, \
-                                         num_steps=self.config.test.gen.dg_num_steps, \
-                                         verbose=self.config.test.gen.verbose)
-                _, _, batch, _ = self.ConfGFDist_generator(batch, self.config.test.gen, embedder)
-            else:
-                raise NotImplementedError
+            try:
+                if generator == 'ConfGF':
+                    _, _, batch, _ = self.ConfGF_generator(batch, self.config.test.gen)
+                elif generator == 'ConfGFDist':
+                    embedder = utils.Embed3D(step_size=self.config.test.gen.dg_step_size, \
+                                             num_steps=self.config.test.gen.dg_num_steps, \
+                                             verbose=self.config.test.gen.verbose)
+                    _, _, batch, _ = self.ConfGFDist_generator(batch, self.config.test.gen, embedder)
+                else:
+                    raise NotImplementedError
+            except Exception as e:
+                logging.info(','.join([e.args[0], str(i), str(return_data.file_id[0].item()), str(return_data.molecule_id[0].item())]))
 
             batch = batch.to('cpu').to_data_list()
 

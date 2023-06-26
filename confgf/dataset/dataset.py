@@ -150,12 +150,17 @@ def df_to_data(node, edge, node_feature_names, molecule, test=False):
         data = add_virtual_bond(data, order=2)
     except:
         return None, 'add virtual bond error'
-    try:
-        data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
-                                    dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
-    except:
-        return None, 'ase get distances error'
+    if not test:
+        try:
+            data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
+                                        dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
+        except:
+            return None, 'ase get distances error'
     if test:
+        pos = data.pos
+        row, col = data.edge_index
+        d = (pos[row] - pos[col]).norm(dim=-1).unsqueeze(-1) # (num_edge, 1)
+        data.edge_length = d
         ase_mol = df_to_ase_mol(molecule.get_cell(), node)
         data.ase_mol = copy.deepcopy(ase_mol)
         data.atom_type = torch.tensor(node['atomic_number'].values, dtype=torch.long)
@@ -598,9 +603,8 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
     print('but use %d confs' % len(pickle_path_list))
 
     test_data = []
-    name_list = []
 
-    bad_case = 0
+    error = defaultdict(list)
 
     for i in tqdm(range(len(pickle_path_list))):
         file_id = summ.loc[pickle_path_list[i], 'extxyz_id']
@@ -617,15 +621,18 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
         edge['bond_type'] = (edge['bond_type'] + 1).astype(int)
         node['id'] = node['id'].astype(int)
         node['label'] = node['label'].astype(int)
+        if (node[node['ac_target'] == 1]['label'] == 2).all():
+            node.loc[node['label'] == 1, 'ac_target'] = 1
+            error['ac target error'].append((file_id, molecule_id))
         node['ac_target'] = node['ac_target'].astype(float)
         edge = edge.rename(columns={'id': 'edge_id', 'node1': 'source', 'node2': 'target'})
         node = node.rename(columns={'id': 'node_id'})
 
         if (node['node_id'].unique().shape[0] != node.shape[0]):
-            bad_case += 1
+            error['node index error'].append((file_id, molecule_id))
             continue
         if (edge[['source', 'target']].duplicated().sum() > 0):
-            bad_case += 1
+            error['edge index error'].append((file_id, molecule_id))
             continue
 
         bin_dict = {'puling_en': {'min': 0.5, 'max': 4, 'num': 10},
@@ -654,27 +661,27 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
             final_node_feature_names += new_names
         assert len(final_node_feature_names) == expected_features_num
 
-        data = df_to_data(node, edge, final_node_feature_names, molecule, test=True)
+        data, conversion_error_type = df_to_data(node, edge, final_node_feature_names, molecule, test=True)
         if data is None:
-            bad_case += 1
+            error[conversion_error_type].append((file_id, molecule_id))
             continue
         node_ref = pd.read_csv(os.path.join(base_path, 'final_node', molecule_path))
         node_ref['id'] = node_ref['id'].astype(int)
         node_ref = node_ref.rename(columns={'id': 'node_id'})
         if not (node['node_id'] == node_ref['node_id']).all():
-            bad_case += 1
+            error['ref node mapping error'].append((file_id, molecule_id))
             continue
         data.pos_ref = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
-        data['idx'] = torch.tensor([i], dtype=torch.long)
+        data['file_id'] = torch.tensor([file_id], dtype=torch.long)
+        data['molecule_id'] = torch.tensor([molecule_id], dtype=torch.long)
         datas = [data]
         test_data.extend(datas)
-        name_list.append((file_path, molecule_path))
 
     print('test size: %d confs' % len(test_data))
-    print('bad case: %d' % bad_case)
+    print('bad case: \n', {i: len(error[i]) for i in error.keys()})
     print('done!')
 
-    return test_data, name_list
+    return test_data, error
 
 
 def preprocess_GEOM_dataset(base_path, dataset_name, conf_per_mol=5, train_size=0.8, tot_mol_size=50000, seed=None):

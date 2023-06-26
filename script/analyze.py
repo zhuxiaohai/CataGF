@@ -5,7 +5,6 @@ import argparse
 from easydict import EasyDict
 import yaml
 import pickle
-import numpy as np
 
 import torch
 from torch_geometric.data import DataLoader
