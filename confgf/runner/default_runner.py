@@ -3,6 +3,7 @@ from time import time
 from tqdm import tqdm
 import os
 import numpy as np
+import pandas as pd
 import pickle
 import copy
 
@@ -106,6 +107,48 @@ class DefaultRunner(object):
         if verbose:
             print('Evaluate %s Loss: %.5f | Time: %.5f' % (split, average_loss, time() - eval_start))
         return average_loss
+
+
+    @torch.no_grad()
+    def analyze(self, split, batch_size, save_path, verbose=0):
+        """
+        Evaluate the model.
+        Parameters:
+            split (str): split to evaluate. Can be ``train``, ``val`` or ``test``.
+        """
+        if split not in ['train', 'val', 'test']:
+            raise ValueError('split should be either train, val, or test.')
+
+        test_set = getattr(self, "%s_set" % split)
+        dataloader = DataLoader(test_set, batch_size=batch_size, \
+                                shuffle=False, num_workers=self.config.train.num_workers)
+        model = self._model
+        model.eval()
+        eval_start = time()
+        result = []
+        for batch_id, batch in enumerate(dataloader):
+            temp = {}
+
+            if self.device.type == "cuda":
+                batch = batch.to(self.device)
+
+            loss, scores, distance_feature, used_sigmas = model.get_edge_info(batch)
+
+            temp['loss'] = loss.cpu().numpy()
+            temp['score'] = scores.cpu().numpy()
+            temp['used_sigmas'] = used_sigmas.cpu().numpy()
+            temp.update({'edge_emb_{}'.format(i): distance_feature[:, i].cpu().numpy() for i in range(distance_feature.shape[-1])})
+            temp['edge_length'] = batch.edge_length.cpu().numpy().flatten()
+            temp['edge_order'] = batch.edge_order.cpu().numpy().flatten()
+            temp['edge_type'] = batch.edge_type.cpu().numpy().flatten()
+            temp['source'] = batch.edge_index[0, :].cpu().numpy().flatten()
+            temp['target'] = batch.edge_index[1, :].cpu().numpy().flatten()
+            temp = pd.DataFrame(temp)
+            result.append(temp)
+        pd.concat(result, axis=0).to_csv(save_path, index=False)
+
+        if verbose:
+            print('Time: %.5f' % (time() - eval_start))
 
 
     def train(self, verbose=1):
