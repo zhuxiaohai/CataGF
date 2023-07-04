@@ -92,7 +92,7 @@ if __name__ == '__main__':
     ])
     # train_data = dataset.GEOMDataset(data=train_data, transform=transform)
     # val_data = dataset.GEOMDataset(data=val_data, transform=transform)
-    # test_data = dataset.GEOMDataset_PackedConf(data=test_data, transform=transform)
+    test_data = dataset.GEOMDataset_PackedConf(data=test_data, transform=transform)
     train_data = dataset.CATADataset(data=train_data, transform=transform)
     val_data = dataset.CATADataset(data=val_data, transform=transform)
     test_data = dataset.CATADataset(data=test_data, transform=transform)

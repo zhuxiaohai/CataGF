@@ -204,3 +204,81 @@ class DistanceScoreMatch(torch.nn.Module):
         loss =  0.5 * ((scores - target) ** 2) * (used_sigmas.squeeze(-1) ** self.anneal_power) # (num_edge)
         loss = scatter_add(loss, edge2graph) # (num_graph)
         return loss
+
+    def get_edge_info(self, data):
+        """
+        Input:
+            data: torch geometric batched data object
+        Output:
+            loss
+        """
+        # a workaround to get the current device, we assume all tensors in a model are on the same device.
+        self.device = self.sigmas.device
+        # data = self.extend_graph(data, self.order)
+        # data = self.get_distance(data)
+
+        assert data.edge_index.size(1) == data.edge_length.size(0)
+        node2graph = data.batch
+        edge2graph = node2graph[data.edge_index[0]]
+
+        # sample noise level
+        noise_level = torch.randint(0, self.sigmas.size(0), (data.num_graphs,), device=self.device) # (num_graph)
+        used_sigmas = self.sigmas[noise_level] # (num_graph)
+        used_sigmas = used_sigmas[edge2graph].unsqueeze(-1) # (num_edge, 1)
+
+        # perturb
+        d = data.edge_length # (num_edge, 1)
+
+        if self.noise_type == 'symmetry':
+            num_nodes = scatter_add(torch.ones(data.num_nodes, dtype=torch.long, device=self.device), node2graph) # (num_graph)
+            num_cum_nodes = num_nodes.cumsum(0) # (num_graph)
+            node_offset = num_cum_nodes - num_nodes # (num_graph)
+            edge_offset = node_offset[edge2graph] # (num_edge)
+
+            num_nodes_square = num_nodes**2 # (num_graph)
+            num_nodes_square_cumsum = num_nodes_square.cumsum(-1) # (num_graph)
+            edge_start = num_nodes_square_cumsum - num_nodes_square # (num_graph)
+            edge_start = edge_start[edge2graph]
+
+            all_len = num_nodes_square_cumsum[-1]
+
+            node_index = data.edge_index.t() - edge_offset.unsqueeze(-1)
+            #node_in, node_out = node_index.t()
+            node_large = node_index.max(dim=-1)[0]
+            node_small = node_index.min(dim=-1)[0]
+            undirected_edge_id = node_large * (node_large + 1) + node_small + edge_start
+
+            symm_noise = torch.empty(all_len, device=self.device).normal_()
+            d_noise = symm_noise[undirected_edge_id].unsqueeze(-1) # (num_edge, 1)
+
+        elif self.noise_type == 'rand':
+            d_noise = torch.randn_like(d)
+        else:
+            raise NotImplementedError('noise type must in [distance_symm, distance_rand]')
+        assert d_noise.shape == d.shape
+        perturbed_d = d + d_noise * used_sigmas
+        #perturbed_d = torch.clamp(perturbed_d, min=0.1, max=float('inf'))    # distances must be greater than 0
+
+
+
+        # get target, origin_d minus perturbed_d
+        target = -1 / (used_sigmas ** 2) * (perturbed_d - d) # (num_edge, 1)
+
+        # estimate scores
+        # node_attr = self.node_emb(data.atom_type) # (num_node, hidden)
+        node_attr = self.node_emb(data.x) # (num_node, hidden)
+        edge_attr = self.edge_emb(data.edge_type) # (num_edge, hidden)
+        d_emb = self.input_mlp(perturbed_d) # (num_edge, hidden)
+        edge_attr = d_emb * edge_attr # (num_edge, hidden)
+
+        output = self.model(data, node_attr, edge_attr)
+        h_row, h_col = output["node_feature"][data.edge_index[0]], output["node_feature"][data.edge_index[1]] # (num_edge, hidden)
+
+        distance_feature = torch.cat([h_row*h_col, edge_attr], dim=-1) # (num_edge, 2 * hidden)
+        scores = self.output_mlp(distance_feature) # (num_edge, 1)
+        scores = scores * (1. / used_sigmas) # f_theta_sigma(x) =  f_theta(x) / sigma, (num_edge, 1)
+
+        target = target.view(-1) # (num_edge)
+        scores = scores.view(-1) # (num_edge)
+        loss =  0.5 * ((scores - target) ** 2) * (used_sigmas.squeeze(-1) ** self.anneal_power) # (num_edge)
+        return loss, scores, distance_feature, used_sigmas.squeeze(-1)

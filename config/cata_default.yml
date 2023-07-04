@@ -33,7 +33,7 @@ train:
 test:
   init_checkpoint: /home/zhuxiaohai/confgf_train/cata_v2
   output_path: /home/zhuxiaohai/confgf_test
-  epoch: 106
+  epoch: 270
   gen:
     dg_step_size: 3.0
     dg_num_steps: 1000  

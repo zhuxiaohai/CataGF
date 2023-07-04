@@ -13,9 +13,9 @@ import multiprocessing
 from functools import partial
 
 
-def metric_func(x, threshold, base_path):
+def metric_func(x, base_path):
     try:
-        result = utils.get_fp_simularity(x, threshold)
+        result = utils.get_fp_simularity(x)
         write(os.path.join(base_path, 'cif', 'gen-{}-{}.cif'.format(x.file_id.item(), x.molecule_id.item())), result[2])
         write(os.path.join(base_path, 'cif', 'ref-{}-{}.cif'.format(x.file_id.item(), x.molecule_id.item())), result[3])
         return result[:2]
@@ -26,10 +26,9 @@ def metric_func(x, threshold, base_path):
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='confgf')
-    parser.add_argument('--base_path', type=str, default='/home/zhuxiaohai/confgf_test/cata')
-    parser.add_argument('--input', type=str, default='ConfGF_s0e200epoch106min_sig0.000.pkl')
+    parser.add_argument('--base_path', type=str, default='/home/zhuxiaohai/confgf_test/cata_v2')
+    parser.add_argument('--input', type=str, default='ConfGF_s0e200epoch270min_sig0.000.pkl')
     parser.add_argument('--core', type=int, default=4)
-    parser.add_argument('--threshold', type=float, default=0.5, help='threshold of COV score')
 
     args = parser.parse_args()
     print(args)
@@ -49,14 +48,14 @@ if __name__ == '__main__':
     print('use %d mols with total %d confs' % (len(filtered_data_list), cnt_conf))
 
     pool = multiprocessing.Pool(args.core)
-    func = partial(metric_func, threshold=args.threshold, base_path=args.base_path)
+    func = partial(metric_func, base_path=args.base_path)
 
     covs = []
     mats = []
     # error_count = 0
     # for i in range(len(filtered_data_list)):
     #     try:
-    #         result = utils.get_fp_simularity(filtered_data_list[i], args.threshold)
+    #         result = utils.get_fp_simularity(filtered_data_list[i])
     #         write('/home/zhuxiaohai/confgf_test/cata/cif/gen-{}.cif'.format(i), result[2])
     #         write('/home/zhuxiaohai/confgf_test/cata/cif/ref-{}.cif'.format(i), result[3])
     #     except:

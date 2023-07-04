@@ -10,9 +10,10 @@ from dscribe.descriptors import MBTR
 from confgf import utils
 
 
-def get_fp_simularity(data: Data, threshold=0.5):
+def get_fp_simularity(data: Data):
     data.pos_ref = data.pos_ref.view(-1, data.num_nodes, 3)
     data.pos_gen = data.pos_gen.view(-1, data.num_nodes, 3)
+    data.pos_init = data.pos_init.view(-1, data.num_nodes, 3)
     num_gen = data.pos_gen.size(0)
     num_ref = data.pos_ref.size(0)
 
@@ -27,6 +28,8 @@ def get_fp_simularity(data: Data, threshold=0.5):
     #             periodic=True,
     #             sparse=False,
     #             normalization="l2")
+    if (data.file_id.item() == 0) and (data.molecule_id.item() == 1008):
+        print('oops')
 
     mbtr = MBTR(species=np.sort(atom_types),
                 k1={"geometry": {"function": "atomic_number"}, "grid": {"min": 1, "max": 86, "sigma": 0.1, "n": 86}, },
@@ -38,21 +41,27 @@ def get_fp_simularity(data: Data, threshold=0.5):
                 normalization="l2_each")
 
     rmsd_confusion_mat = -1 * np.ones([num_ref, num_gen], dtype=np.float)
+    rmsd_confusion_mat_raw = -1 * np.ones([num_ref, num_gen], dtype=np.float)
 
     for i in range(num_gen):
         gen_mol = utils.set_asemol_positions(data.ase_mol[data.ac_target == 1], data.pos_gen[i][data.ac_target == 1])
         gen_fp = mbtr.create(system=gen_mol, n_jobs=1, only_physical_cores=False)
+        init_mol = utils.set_asemol_positions(data.ase_mol[data.ac_target == 1], data.pos_init[i][data.ac_target == 1])
+        init_fp = mbtr.create(system=init_mol, n_jobs=1, only_physical_cores=False)
         for j in range(num_ref):
             ref_mol = utils.set_asemol_positions(data.ase_mol[data.ac_target == 1], data.pos_ref[j][data.ac_target == 1])
             ref_fp = mbtr.create(system=ref_mol, n_jobs=1, only_physical_cores=False)
             cos_sim = gen_fp.dot(ref_fp) / (np.linalg.norm(gen_fp) * np.linalg.norm(ref_fp))
+            cos_sim_raw = init_fp.dot(ref_fp) / (np.linalg.norm(init_fp) * np.linalg.norm(ref_fp))
             rmsd_confusion_mat[j, i] = cos_sim
+            rmsd_confusion_mat_raw[j, i] = cos_sim_raw
             # rmsd_confusion_mat[j, i] = np.sqrt(np.sum((gen_fp - ref_fp)**2))
-            gen_mol_output = utils.set_asemol_positions(data.ase_mol, data.pos_gen[i])
-            ref_mol_output = utils.set_asemol_positions(data.ase_mol, data.pos_ref[j])
+            gen_mol_output = utils.set_asemol_positions(data.ase_mol, data.pos_gen[j])
+            ref_mol_output = utils.set_asemol_positions(data.ase_mol, data.pos_ref[i])
     rmsd_ref_min = rmsd_confusion_mat.min(-1)
+    rmsd_ref_min_raw = rmsd_confusion_mat_raw.min(-1)
 
-    return (rmsd_ref_min <= threshold).mean(), rmsd_ref_min.mean(), gen_mol_output, ref_mol_output
+    return rmsd_ref_min_raw.mean(), rmsd_ref_min.mean(), gen_mol_output, ref_mol_output
 
 
 def get_rmsd_confusion_matrix(data: Data, useFF=False):
@@ -92,9 +101,9 @@ def evaluate_distance(data: Data, ignore_H=True):
     num_gen = data.pos_gen.size(0) # M
     assert num_gen == data.num_pos_gen.item()
     assert num_ref == data.num_pos_ref.item()
-    smiles = data.smiles
+    # smiles = data.smiles
 
-    edge_index = data.edge_index
+    edge_index = data.edge_index[:, data.is_bond == False]
     atom_type = data.atom_type
 
     # compute generated length and ref length 
@@ -177,7 +186,7 @@ def evaluate_distance(data: Data, ignore_H=True):
         'ref_lengths': ref_L.cpu(),
         'mmd': mmd
     }
-    return stats_single, stats_pair, stats_all
+    return stats_single, stats_pair, stats_all, data.file_id.item(), data.molecule_id.item()
 
 def guassian_kernel(source, target, kernel_mul=2.0, kernel_num=5, fix_sigma=None):
     '''

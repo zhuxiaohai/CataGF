@@ -96,6 +96,7 @@ def add_virtual_bond(data: Data, order=2):
         mask = mask - torch.eye(adj.size(0), dtype=torch.long, device=adj.device)
         return torch.where((mask == 1) & (adj == 0), torch.ones((adj.size(0), adj.size(0))) * order, adj)
 
+    state = 'None'
     num_types = len(utils.BOND_TYPES)
     N = data.num_nodes
     adj = to_dense_adj(data.edge_index).squeeze(0)
@@ -106,6 +107,7 @@ def add_virtual_bond(data: Data, order=2):
     if atom_num > adj_dim:
         expand_num = atom_num - adj_dim
         adj = torch.nn.ZeroPad2d((0, expand_num, 0, expand_num))(adj)
+        state = 'warn: isolation atom in overall'
     adj_order = get_higher_order_adj_matrix(adj, order, ac_target)  # (N, N)
 
     type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
@@ -125,10 +127,106 @@ def add_virtual_bond(data: Data, order=2):
     data.is_bond = (data.edge_type < num_types)
     assert (data.edge_index == edge_index_1).all()
 
-    return data
+    return data, state
 
 
-def df_to_data(node, edge, node_feature_names, molecule, test=False):
+def add_virtual_bond_analysis(data: Data, order=3, virtual_bond_label=2):
+    def binarize(x):
+        return torch.where(x > 0, torch.ones_like(x), torch.zeros_like(x))
+
+    def get_higher_order_adj_matrix(adj, order, ac_target):
+        """
+        Args:
+            adj:        (N, N)
+            type_mat:   (N, N)
+        """
+        mask = torch.matmul(ac_target.unsqueeze(-1), ac_target.unsqueeze(0))
+        mask = mask - torch.eye(adj.size(0), dtype=torch.long, device=adj.device)
+        # 1: 1-degree neighbor,
+        # 2: neighbor degree > 1 and both actargets,
+        # 0: neighbor degree > 1 but not both actargets
+        return torch.where((mask == 1) & (adj == 0), torch.ones((adj.size(0), adj.size(0))) * order, adj)
+
+    def get_virtual_bond_adj_matrix(adj, order, ac_target):
+        """
+        Args:
+            adj:        (N, N)
+            type_mat:   (N, N)
+        """
+        adj_mats = [torch.eye(adj.size(0), dtype=torch.long, device=adj.device), \
+                    binarize(adj + torch.eye(adj.size(0), dtype=torch.long, device=adj.device))]
+        for i in range(2, order + 1):
+            adj_mats.append(binarize(adj_mats[i-1] @ adj_mats[1]))
+        order_mat = torch.zeros_like(adj)
+        for i in range(1, order + 1):
+            order_mat = order_mat + (adj_mats[i] - adj_mats[i - 1]) * i
+        mask = torch.matmul(ac_target.unsqueeze(-1), ac_target.unsqueeze(0))
+        mask = mask - torch.eye(adj.size(0), dtype=torch.long, device=adj.device)
+        order_mat = torch.where(mask == 1, order_mat, adj)
+        order_mat = torch.where((mask == 1) & (order_mat == 0), torch.ones_like(adj) * (order + 1), order_mat)
+        # order_mat
+        # 1: 1-degree neighbor,
+        # 2: 2-degree neighbor and both actargets, ...,
+        # order: order-degree neighbor and both actarget,
+        # order+1: neighbor degree > order and both actargets
+        # 0: neighbor degree > 1 but not both actargets
+        return order_mat
+
+    state = 'None'
+    num_types = len(utils.BOND_TYPES)
+    N = data.num_nodes
+    adj = to_dense_adj(data.edge_index).squeeze(0)
+    adj = binarize(adj)
+    adj_dim = adj.size(0)
+    if N > adj_dim:
+        expand_num = N - adj_dim
+        adj = torch.nn.ZeroPad2d((0, expand_num, 0, expand_num))(adj)
+        state = 'warn: isolation atom in overall'
+    adj_virtual = get_virtual_bond_adj_matrix(adj, order, data.ac_target)  # (N, N)
+    adj_order = get_higher_order_adj_matrix(adj, virtual_bond_label, data.ac_target)  # (N, N)
+
+    type_mat = to_dense_adj(data.edge_index, edge_attr=data.edge_type).squeeze(0)   # (N, N)
+    if N > adj_dim:
+        expand_num = N - adj_dim
+        type_mat = torch.nn.ZeroPad2d((0, expand_num, 0, expand_num))(type_mat)
+    type_highorder = torch.where(adj_order > 1, num_types + adj_order - 1, torch.zeros_like(adj_order))
+    assert (type_mat * type_highorder == 0).all()
+    type_new = type_mat + type_highorder
+
+    new_edge_index, new_edge_type = dense_to_sparse(type_new)
+    _, edge_virtual = dense_to_sparse(adj_virtual)
+    _, edge_order = dense_to_sparse(adj_order)
+
+    data.bond_edge_index = data.edge_index
+    data.edge_index, data.edge_type = coalesce(new_edge_index, new_edge_type.long(), N, N) # modify data
+    edge_index_1, data.edge_order = coalesce(new_edge_index, edge_order.long(), N, N)  # modify data
+    edge_index_2, data.edge_virtual = coalesce(new_edge_index, edge_virtual.long(), N, N)  # modify data
+    data.is_bond = (data.edge_type < num_types)
+    assert (data.edge_index == edge_index_1).all()
+    assert (data.edge_index == edge_index_2).all()
+    assert edge_order.shape[0] == data.edge_type.shape[0]
+    assert edge_virtual.shape[0] == data.edge_type.shape[0]
+
+    # edge_label
+    # 1: 1-degree neighbor,
+    # 2: neighbor degree > 1 and both actargets and neighbor_type is body-body,
+    # 3: neighbor degree > 1 and both actargets and neighbor_type is body-surface,
+    # 4: neighbor degree > 1 and both actargets and neighbor_type is body-molecule,
+    # 5: neighbor degree > 1 and both actargets and neighbor_type is surface-surface,
+    # 6: neighbor degree > 1 and both actargets and neighbor_type is surface-molecule,
+    # 7: neighbor degree > 1 and both actargets and neighbor_type is molecule-molecule,
+    edge_label = torch.ones_like(data.edge_virtual)
+    for neighbor_type, (i, j) in enumerate([(0, 0), (0, 1), (0, 2), (1, 1), (1, 2), (2, 2)]):
+        condition = ((data.label[data.edge_index[0, :]] == i) & (data.label[data.edge_index[1, :]] == j)) | \
+                    ((data.label[data.edge_index[0, :]] == j) & (data.label[data.edge_index[1, :]] == i))
+        edge_label = torch.where(condition & (data.edge_virtual > 1),
+                                 torch.ones_like(edge_label) * (2+neighbor_type), edge_label)
+    data.edge_label = edge_label
+
+    return data, state
+
+
+def df_to_data(node, edge, node_feature_names, molecule, data_set='train_eval'):
     pos = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
     edge_index = torch.tensor([edge['source'].tolist(),
                                edge['target'].tolist()], dtype=torch.long)
@@ -143,30 +241,33 @@ def df_to_data(node, edge, node_feature_names, molecule, test=False):
         G.num_nodes = node[(node['label'] == 0) | (node['label'] == 1)].shape[0]
         G = to_networkx(G, to_undirected=True)
     except:
-        return None, 'isolation atom in body'
+        return None, 'error: isolation atom in body'
     if len(list(nx.connected_components(G))) > 1:
-        return None, 'body components > 1'
-    try:
-        data = add_virtual_bond(data, order=2)
-    except:
-        return None, 'add virtual bond error'
-    if not test:
+        return None, 'error: body components > 1'
+    data.atom_type = torch.tensor(node['atomic_number'].values, dtype=torch.long)
+    data.label = torch.tensor(node['label'].values, dtype=torch.float32)
+    # try:
+    if data_set.find('analysis') < 0:
+        data, state = add_virtual_bond(data, order=2)
+    else:
+        data, state = add_virtual_bond_analysis(data, order=3, virtual_bond_label=2)
+    # except:
+    #     return None, 'error: in adding virtual bond'
+    if data_set.find('test') < 0:
         try:
             data.edge_length = torch.tensor(molecule.get_distances(data.edge_index[0], data.edge_index[1], mic=True),
                                         dtype=torch.float32).unsqueeze(-1) # (num_edge, 1)
         except:
-            return None, 'ase get distances error'
-    if test:
+            return None, 'error: in ase getting distances'
+    else:
         pos = data.pos
         row, col = data.edge_index
         d = (pos[row] - pos[col]).norm(dim=-1).unsqueeze(-1) # (num_edge, 1)
         data.edge_length = d
+        data.pos_init = data.pos
         ase_mol = df_to_ase_mol(molecule.get_cell(), node)
         data.ase_mol = copy.deepcopy(ase_mol)
-        data.atom_type = torch.tensor(node['atomic_number'].values, dtype=torch.long)
-        data.num_pos_ref = torch.tensor([1], dtype=torch.long)
-        data.label = torch.tensor(node['label'].values, dtype=torch.float32)
-    return data, 'None'
+    return data, state
 
 
 def df_to_ase_mol(cell, node):
@@ -175,7 +276,7 @@ def df_to_ase_mol(cell, node):
         atom = Atom(node['atomic_number'].iloc[i],
                     position=node[['x', 'y', 'z']].iloc[i].tolist())
         atoms.append(atom)
-    mol = Atoms(atoms, cell=cell, pbc=True)
+    mol = Atoms(atoms, cell=cell*np.array([[3.0], [3.0], [1.0]]), pbc=True)
     return mol
 
 
@@ -440,7 +541,8 @@ def preprocess_CATA_dataset_mp(base_path, train_size=0.8, val_size=0.2, tot_mol_
     print('done!')
 
 
-def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_size=5000, seed=None):
+def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_size=5000,
+                            seed=None, analysis_split={}):
     """
     base_path: directory that contains GEOM dataset
     conf_per_mol: keep mol that has at least conf_per_mol confs, and sampling the most probable conf_per_mol confs
@@ -453,6 +555,10 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
         seed = 2021
     np.random.seed(seed)
     random.seed(seed)
+    if analysis_split:
+        data_set = 'train_val_analysis'
+    else:
+        data_set = 'train_val'
 
     # read summary file
     summary_path = os.path.join(base_path, 'summary', 'summary.csv')
@@ -487,10 +593,20 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
 
     num_mols = np.zeros(4, dtype=int)  # (tot, train, val, test)
     num_confs = np.zeros(4, dtype=int)  # (tot, train, val, test)
+    analysis_dict = {'train': 0, 'val': 0, 'test': 0}
 
-    error = {}
+    error = defaultdict(list)
 
     for i in tqdm(range(len(pickle_path_list))):
+        if analysis_split:
+            if all([analysis_dict[j] >= analysis_split[j] for j in analysis_split.keys()]):
+                break
+            elif index2split[i] not in analysis_split:
+                continue
+            elif analysis_dict[index2split[i]] >= analysis_split[index2split[i]]:
+                continue
+            else:
+                analysis_dict[index2split[i]] += 1
         file_id = summ.loc[pickle_path_list[i], 'extxyz_id']
         molecule_id = summ.loc[pickle_path_list[i], 'data_id']
         file_path = str(file_id) + '.extxyz'
@@ -504,15 +620,18 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
         edge['bond_type'] = (edge['bond_type'] + 1).astype(int)
         node['id'] = node['id'].astype(int)
         node['label'] = node['label'].astype(int)
+        if (node[node['ac_target'] == 1]['label'] == 2).all():
+            node.loc[node['label'] == 1, 'ac_target'] = 1
+            error['warn: checking ac targets composition'].append((file_id, molecule_id, index2split[i]))
         node['ac_target'] = node['ac_target'].astype(float)
         edge = edge.rename(columns={'id': 'edge_id', 'node1': 'source', 'node2': 'target'})
         node = node.rename(columns={'id': 'node_id'})
 
         if node['node_id'].unique().shape[0] != node.shape[0]:
-            error['node index error'] = error.get('node index error', 0) + 1
+            error['node index error'].append((file_id, molecule_id, index2split[i]))
             continue
         if edge[['source', 'target']].duplicated().sum() > 0:
-            error['edge index error'] = error.get('edge index error', 0) + 1
+            error['edge index error'].append((file_id, molecule_id, index2split[i]))
             continue
 
         bin_dict = {'puling_en': {'min': 0.5, 'max': 4, 'num': 10},
@@ -524,7 +643,8 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
                      'unpaired_elec': [list(range(9))],
                      'valence_elec': [list(range(1, 18))],
                      'block': [list(range(4))]}
-        node_feature_names = list(cate_dict.keys())
+        node_feature_names = ['puling_en', 'ionization_eng_lg',
+                              'covalent_radius', 'unpaired_elec', 'valence_elec', 'block']
         expected_features_num = 10 + 9 + 10 + 9 + 17 + 4
         final_node_feature_names = []
         for col in node_feature_names:
@@ -541,11 +661,16 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
             final_node_feature_names += new_names
         assert len(final_node_feature_names) == expected_features_num
 
-        data, conversion_error_type = df_to_data(node, edge, final_node_feature_names, molecule)
+        data, conversion_error_type = df_to_data(node, edge, final_node_feature_names, molecule, data_set)
         if data is None:
-            error[conversion_error_type] = error.get(conversion_error_type, 0) + 1
+            error[conversion_error_type].append((file_id, molecule_id, index2split[i]))
             continue
-        data['idx'] = torch.tensor([i], dtype=torch.long)
+        elif conversion_error_type != 'None':
+            error[conversion_error_type].append((file_id, molecule_id, index2split[i]))
+        if analysis_split:
+            data['node_features'] = torch.tensor(node[node_feature_names+['degree']].values, dtype=torch.float32)
+        data['file_id'] = torch.tensor([file_id], dtype=torch.long)
+        data['molecule_id'] = torch.tensor([molecule_id], dtype=torch.long)
         datas = [data]
 
         if index2split[i] == 'train':
@@ -567,13 +692,13 @@ def preprocess_CATA_dataset(base_path, train_size=0.8, val_size=0.2, tot_mol_siz
     print('train size: %d molecules with %d confs' % (num_mols[1], num_confs[1]))
     print('val size: %d molecules with %d confs' % (num_mols[2], num_confs[2]))
     print('test size: %d molecules with %d confs' % (num_mols[3], num_confs[3]))
-    print('bad case: \n', error)
+    print('bad case: \n', {i: len(error[i]) for i in error.keys()})
     print('done!')
 
-    return train_data, val_data, test_data, index2split
+    return train_data, val_data, test_data, index2split, error
 
 
-def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
+def get_CATA_testset(base_path, tot_mol_size=5000, seed=None, analysis_split={}):
     """
     base_path: directory that contains GEOM dataset
     conf_per_mol: keep mol that has at least conf_per_mol confs, and sampling the most probable conf_per_mol confs
@@ -586,6 +711,10 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
         seed = 2021
     np.random.seed(seed)
     random.seed(seed)
+    if analysis_split:
+        data_set = 'test_analysis'
+    else:
+        data_set = 'test'
 
     # read summary file
     summary_path = os.path.join(base_path, 'summary', 'summary.csv')
@@ -607,6 +736,8 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
     error = defaultdict(list)
 
     for i in tqdm(range(len(pickle_path_list))):
+        if analysis_split and (i >= analysis_split['test']):
+            break
         file_id = summ.loc[pickle_path_list[i], 'extxyz_id']
         molecule_id = summ.loc[pickle_path_list[i], 'data_id']
         file_path = str(file_id) + '.extxyz'
@@ -623,16 +754,16 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
         node['label'] = node['label'].astype(int)
         if (node[node['ac_target'] == 1]['label'] == 2).all():
             node.loc[node['label'] == 1, 'ac_target'] = 1
-            error['ac target error'].append((file_id, molecule_id))
+            error['warn: checking ac targets composition'].append((file_id, molecule_id, 'test'))
         node['ac_target'] = node['ac_target'].astype(float)
         edge = edge.rename(columns={'id': 'edge_id', 'node1': 'source', 'node2': 'target'})
         node = node.rename(columns={'id': 'node_id'})
 
         if (node['node_id'].unique().shape[0] != node.shape[0]):
-            error['node index error'].append((file_id, molecule_id))
+            error['node index error'].append((file_id, molecule_id, 'test'))
             continue
         if (edge[['source', 'target']].duplicated().sum() > 0):
-            error['edge index error'].append((file_id, molecule_id))
+            error['edge index error'].append((file_id, molecule_id, 'test'))
             continue
 
         bin_dict = {'puling_en': {'min': 0.5, 'max': 4, 'num': 10},
@@ -644,7 +775,8 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
                      'unpaired_elec': [list(range(9))],
                      'valence_elec': [list(range(1, 18))],
                      'block': [list(range(4))]}
-        node_feature_names = list(cate_dict.keys())
+        node_feature_names = ['puling_en', 'ionization_eng_lg',
+                              'covalent_radius', 'unpaired_elec', 'valence_elec', 'block']
         expected_features_num = 10 + 9 + 10 + 9 + 17 + 4
         final_node_feature_names = []
         for col in node_feature_names:
@@ -661,17 +793,22 @@ def get_CATA_testset(base_path, tot_mol_size=5000, seed=None):
             final_node_feature_names += new_names
         assert len(final_node_feature_names) == expected_features_num
 
-        data, conversion_error_type = df_to_data(node, edge, final_node_feature_names, molecule, test=True)
+        data, conversion_error_type = df_to_data(node, edge, final_node_feature_names, molecule, data_set)
         if data is None:
-            error[conversion_error_type].append((file_id, molecule_id))
+            error[conversion_error_type].append((file_id, molecule_id, 'test'))
             continue
+        elif conversion_error_type != 'None':
+            error[conversion_error_type].append((file_id, molecule_id, 'test'))
         node_ref = pd.read_csv(os.path.join(base_path, 'final_node', molecule_path))
         node_ref['id'] = node_ref['id'].astype(int)
         node_ref = node_ref.rename(columns={'id': 'node_id'})
         if not (node['node_id'] == node_ref['node_id']).all():
-            error['ref node mapping error'].append((file_id, molecule_id))
+            error['error: in ref node mapping'].append((file_id, molecule_id, 'test'))
             continue
-        data.pos_ref = torch.tensor(node[['x', 'y', 'z']].values, dtype=torch.float32)
+        data.pos_ref = torch.tensor(node_ref[['x', 'y', 'z']].values, dtype=torch.float32)
+        data.num_pos_ref = torch.tensor([1], dtype=torch.long)
+        if analysis_split:
+            data['node_features'] = torch.tensor(node[node_feature_names+['degree']].values, dtype=torch.float32)
         data['file_id'] = torch.tensor([file_id], dtype=torch.long)
         data['molecule_id'] = torch.tensor([molecule_id], dtype=torch.long)
         datas = [data]
