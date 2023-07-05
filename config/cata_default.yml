@@ -8,9 +8,9 @@ train:
   num_workers: 0
   gpus:
     - 0
-    - null
-    - null
-    - null
+    - 1
+    - 2
+    - 3
   anneal_power: 2.0
   save: true
   save_path: /home/zhuxiaohai/confgf_train
@@ -55,7 +55,7 @@ data:
 
 
 model:
-  name: cata_v2
+  name: cata_v2_distributed
   hidden_dim: 256
   num_convs: 4
   sigma_begin: 10
