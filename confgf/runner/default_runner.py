@@ -17,34 +17,26 @@ from torch_scatter import scatter_add
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import Subset
 from confgf import utils, dataset
 
 
-def reduce_mean(tensor, nprocs):
+def reduce_mean(tensor):
     rt = tensor.clone()
     dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt /= nprocs
+    rt /= dist.get_world_size()
     return rt
 
 
 class DefaultRunner(object):
-    def __init__(self, train_set, val_set, test_set, model, optimizer, scheduler, gpus, config, rank=None):
+    def __init__(self, train_set, val_set, test_set, model, optimizer, scheduler, gpus, config, distributed=False):
         self.train_set = train_set 
         self.val_set = val_set
         self.test_set = test_set
         self.gpus = gpus
-        if len(gpus) > 0:
-            self.type = 'cuda'
-        else:
-            self.type = 'cpu'
-        if rank is not None:
-            self.device = rank
-        else:
-            self.device = torch.device(gpus[0]) if len(gpus) > 0 else torch.device('cpu')
+        self.distributed = distributed
+        self.device = gpus[0] if self.distributed else torch.device(gpus[0]) if len(gpus) > 0 else torch.device('cpu')
         self.config = config
-        
-        self.batch_size = self.config.train.batch_size
-
         self._model = model
         self._optimizer = optimizer
         self._scheduler = scheduler
@@ -52,10 +44,13 @@ class DefaultRunner(object):
         self.best_loss = 1e10
         self.start_epoch = 0
 
-        if self.type == 'cuda':
+        if self.distributed:
             self._model = self._model.cuda(self.device)
-            if rank is not None:
-                self._model = DDP(model, device_ids=[self.device])
+            self._model = DDP(self._model, device_ids=[self.device])
+            self.batch_size = int(self.config.train.batch_size / dist.get_world_size())
+        elif self.device.type == 'cuda':
+            self._model = self._model.cuda(self.device)
+
 
     def save(self, checkpoint, epoch=None, var_list={}):
 
@@ -85,7 +80,7 @@ class DefaultRunner(object):
 
         if load_optimizer:
             self._optimizer.load_state_dict(state["optimizer"])
-            if self.type == 'cuda':
+            if self.distributed or (self.device.type == 'cuda'):
                 for state in self._optimizer.state.values():
                     for k, v in state.items():
                         if isinstance(v, torch.Tensor):
@@ -102,45 +97,57 @@ class DefaultRunner(object):
         Parameters:
             split (str): split to evaluate. Can be ``train``, ``val`` or ``test``.
         """
+        def run_validate(loader):
+            for batch in loader:
+                if self.distributed or self.device.type == "cuda":
+                    if not self.distributed:
+                        batch = batch.to(self.device)
+                    else:
+                        batch = batch.cuda(self.device, non_blocking=True)
+
+                loss = model(batch)
+                loss = loss.mean()
+                losses_meter.update(loss.item(), batch.num_graphs)
+
         if split not in ['train', 'val', 'test']:
             raise ValueError('split should be either train, val, or test.')
 
         test_set = getattr(self, "%s_set" % split)
-        if not isinstance(self.device, torch.device):
-            test_sampler = DistributedSampler(test_set)
+        if self.distributed:
+            test_sampler = DistributedSampler(test_set, shuffle=False, drop_last=True)
             pin_memory = True
         else:
             test_sampler = None
             pin_memory = False
-        dataloader = DataLoader(test_set, batch_size=self.config.train.batch_size, \
+        dataloader = DataLoader(test_set, batch_size=self.batch_size,
                                 shuffle=False, num_workers=self.config.train.num_workers,
                                 pin_memory=pin_memory, sampler=test_sampler)
         model = self._model
         model.eval()
         if test_sampler is not None:
             test_sampler.set_epoch(epoch)
+
         # code here
         eval_start = time()
-        eval_losses = []
-        for batch in dataloader:
-            if self.type == "cuda":
-                if isinstance(self.device, torch.device):
-                    batch = batch.to(self.device)
-                else:
-                    batch = batch.cuda(self.device, non_blocking=True)
+        losses_meter = utils.AverageMeter('Loss', self.device, ':.2e')
+        run_validate(dataloader)
+        if self.distributed and (len(dataloader.sampler) * dist.get_world_size() < len(dataloader.dataset)) and \
+                (self.device == 0) and (dist.get_rank() == 0):
+            aux_val_dataset = Subset(dataloader.dataset,
+                                     range(len(dataloader.sampler) * dist.get_world_size(), len(dataloader.dataset)))
+            aux_val_loader = DataLoader(
+                aux_val_dataset, batch_size=self.batch_size, shuffle=False,
+                num_workers=self.config.train.num_workers, pin_memory=pin_memory)
+            run_validate(aux_val_loader)
 
-            loss = model(batch)
-            loss = loss.mean()
-            if not isinstance(self.device, torch.device):
-                torch.distributed.barrier()
-                loss = reduce_mean(loss, len(self.gpus))
-            eval_losses.append(loss.item())       
-        average_loss = sum(eval_losses) / len(eval_losses)
+        if self.distributed:
+            losses_meter.all_reduce()
+        average_loss = losses_meter.avg
 
         if verbose:
-            if isinstance(self.device, torch.device) or (
-                    (not isinstance(self.device, torch.device)) and (self.device == 0)):
-                print('Evaluate %s Loss: %.5f | Time: %.5f' % (split, average_loss, time() - eval_start))
+            if (not self.distributed) or (self.distributed and (self.device == 0)):
+                print('Evaluate %s Loss: %.5f of %d samples | Time: %.5f' % (split, average_loss, losses_meter.count, time() - eval_start))
+
         return average_loss
 
 
@@ -203,7 +210,7 @@ class DefaultRunner(object):
         train_start = time()
 
         num_epochs = self.config.train.epochs
-        if not isinstance(self.device, torch.device):
+        if self.distributed:
             train_sampler = DistributedSampler(self.train_set)
             pin_memory = True
             shuffle = False
@@ -211,7 +218,7 @@ class DefaultRunner(object):
             train_sampler = None
             pin_memory = False
             shuffle = self.config.train.shuffle
-        dataloader = DataLoader(self.train_set, batch_size=self.config.train.batch_size,
+        dataloader = DataLoader(self.train_set, batch_size=self.batch_size,
                                 shuffle=shuffle, num_workers=self.config.train.num_workers,
                                 pin_memory=pin_memory, sampler=train_sampler)
 
@@ -228,45 +235,47 @@ class DefaultRunner(object):
                 train_sampler.set_epoch(epoch)
             model.train()
             epoch_start = time()
-            batch_losses = []
+            # batch_losses = []
+            losses_meter = utils.AverageMeter('Loss', self.device, ':.2e')
             batch_cnt = 0
             for batch in dataloader:
                 batch_cnt += 1
-                if self.type == "cuda":
-                    if isinstance(self.device, torch.device):
+                if self.distributed or self.device.type == 'cuda':
+                    if not self.distributed:
                         batch = batch.to(self.device)
                     else:
                         batch = batch.cuda(self.device, non_blocking=True)
 
                 loss = model(batch)
                 loss = loss.mean()
-                if not isinstance(self.device, torch.device):
-                    torch.distributed.barrier()
-                    loss_print = reduce_mean(loss, len(self.gpus))
-                else:
-                    loss_print = loss
+                losses_meter.update(loss.item(), batch.num_graphs)
+                # if not isinstance(self.device, torch.device):
+                #     torch.distributed.barrier()
+                #     loss_print = reduce_mean(loss)
+                # else:
+                #     loss_print = loss
                 if not loss.requires_grad:
                     raise RuntimeError("loss doesn't require grad")
                 self._optimizer.zero_grad()
                 loss.backward()
                 self._optimizer.step()
-                batch_losses.append(loss_print.item())
+                # batch_losses.append(loss_print.item())
 
-                if batch_cnt % self.config.train.log_interval == 0 or (epoch==0 and batch_cnt <= 10):
+                if batch_cnt % self.config.train.log_interval == 0 or (epoch == 0 and batch_cnt <= 10):
                 #if batch_cnt % self.config.train.log_interval == 0:
-                    if isinstance(self.device, torch.device) or ((not isinstance(self.device, torch.device)) and (self.device == 0)):
+                    if (not self.distributed) or (self.distributed and (self.device == 0)):
                         print('Epoch: %d | Step: %d | loss: %.5f | Lr: %.5f' % \
-                                            (epoch + start_epoch, batch_cnt, batch_losses[-1], self._optimizer.param_groups[0]['lr']))
+                                            (epoch + start_epoch, batch_cnt, losses_meter.val, self._optimizer.param_groups[0]['lr']))
 
-
-            average_loss = sum(batch_losses) / len(batch_losses)
+            if self.distributed:
+                losses_meter.all_reduce()
+            average_loss = losses_meter.avg
             train_losses.append(average_loss)
 
                 
 
             if verbose:
-                if isinstance(self.device, torch.device) or (
-                        (not isinstance(self.device, torch.device)) and (self.device == 0)):
+                if (not self.distributed) or (self.distributed and (self.device == 0)):
                     print('Epoch: %d | Train Loss: %.5f | Time: %.5f' % (epoch + start_epoch, average_loss, time() - epoch_start))
 
             # evaluate
@@ -285,8 +294,7 @@ class DefaultRunner(object):
 
             if val_losses[-1] < best_loss:
                 best_loss = val_losses[-1]
-                if self.config.train.save and ((isinstance(self.device, torch.device)) or
-                                               ((not isinstance(self.device, torch.device)) and (self.device == 0))):
+                if self.config.train.save and ((not self.distributed) or (self.distributed and (self.device == 0))):
                     val_list = {
                                 'cur_epoch': epoch + start_epoch,
                                 'best_loss': best_loss,

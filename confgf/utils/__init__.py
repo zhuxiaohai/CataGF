@@ -5,7 +5,7 @@ from .distgeom import Embed3D, get_d_from_pos
 from .transforms import AddHigherOrderEdges, AddEdgeLength, AddPlaceHolder, AddEdgeName, AddAngleDihedral, \
         CountNodesPerGraph
 from .torch import ExponentialLR_with_minLr, repeat_batch, repeat_data, get_optimizer, get_scheduler, clip_norm
-from .evaluation import evaluate_conf, evaluate_distance, get_rmsd_confusion_matrix, get_fp_simularity
+from .evaluation import evaluate_conf, evaluate_distance, get_rmsd_confusion_matrix, get_fp_simularity, AverageMeter
 
 __all__ = ["BOND_TYPES", "BOND_NAMES", "set_conformer_positions", "draw_mol_image",
            "update_data_rdmol_positions", "update_data_pos_from_rdmol", "set_rdmol_positions",
@@ -17,4 +17,5 @@ __all__ = ["BOND_TYPES", "BOND_NAMES", "set_conformer_positions", "draw_mol_imag
            "ExponentialLR_with_minLr",
            "repeat_batch", "repeat_data", 
            "get_optimizer", "get_scheduler", "clip_norm",
-           "evaluate_conf", "evaluate_distance", "get_rmsd_confusion_matrix", "get_fp_simularity", "set_asemol_positions"]
+           "evaluate_conf", "evaluate_distance", "get_rmsd_confusion_matrix", "get_fp_simularity", "set_asemol_positions",
+           "AverageMeter"]

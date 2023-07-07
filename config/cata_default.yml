@@ -52,6 +52,9 @@ data:
   train_set: train_data_126k.pkl
   val_set: val_data_31k.pkl
   test_set: test_data_199.pkl
+#  train_set: temp_train.pkl
+#  val_set: temp_val.pkl
+#  test_set: test_data_199.pkl
 
 
 model:

@@ -69,8 +69,11 @@ if __name__ == '__main__':
             val_data = pickle.load(fin)
     print('train size : %d  ||  val size: %d  ||  test size: %d ' % (len(train_data), len(val_data), len(test_data)))
     print('loading data done!')
+    # import joblib
+    # joblib.dump(train_data[:1280], os.path.join(load_path, 'temp_train.pkl'))
+    # joblib.dump(val_data[:1000], os.path.join(load_path, 'temp_val.pkl'))
     
-    transform = None      
+    transform = None
     # train_data = dataset.GEOMDataset(data=train_data, transform=transform)
     # val_data = dataset.GEOMDataset(data=val_data, transform=transform)
     # test_data = dataset.GEOMDataset_PackedConf(data=test_data, transform=transform)
@@ -86,5 +89,5 @@ if __name__ == '__main__':
     if config.train.resume_train:
         solver.load(config.train.resume_checkpoint, epoch=config.train.resume_epoch, load_optimizer=True, load_scheduler=True)
     solver.train()
-
-
+    #
+    #

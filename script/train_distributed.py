@@ -24,20 +24,8 @@ def worker(local_rank, local_world_size, config):
 
     print(
         f"[{os.getpid()}] rank = {dist.get_rank()}, local_rank = {local_rank}, "
-        + f"world_size = {dist.get_world_size()}, devices_num = {n}, device_ids = {device_ids}"
+        + f"world_size = {dist.get_world_size()}, local_world_size = {local_world_size}, devices_num = {n}, device_ids = {device_ids}"
     )
-
-    config.train.batch_size = int(config.train.batch_size / local_world_size)
-
-    # set random seed
-    np.random.seed(config.train.seed)
-    random.seed(config.train.seed)
-    torch.manual_seed(config.train.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(config.train.seed)
-        torch.cuda.manual_seed_all(config.train.seed)
-    torch.backends.cudnn.benchmark = True
-    print('set seed for random, numpy and torch')
 
     load_path = os.path.join(config.data.base_path, '%s_processed' % config.data.dataset)
     print('loading data from %s' % load_path)
@@ -68,13 +56,13 @@ def worker(local_rank, local_world_size, config):
     optimizer = utils.get_optimizer(config.train.optimizer, model)
     scheduler = utils.get_scheduler(config.train.scheduler, optimizer)
 
-    solver = runner.DefaultRunner(train_data, val_data, test_data, model, optimizer, scheduler, device_ids, config, device_ids[0])
+    solver = runner.DefaultRunner(train_data, val_data, test_data, model, optimizer, scheduler, device_ids, config, True)
     if config.train.resume_train:
         # Use a barrier() to make sure that process 1 loads the model after process
         # 0 saves it.
         dist.barrier()
         # configure map_location properly
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % device_ids[0]}
         solver.load(config.train.resume_checkpoint, epoch=config.train.resume_epoch, load_optimizer=True,
                     load_scheduler=True, map_location=map_location)
     solver.train()
@@ -92,6 +80,15 @@ def spmd_main(local_world_size, local_rank, config):
         f"[{os.getpid()}] world_size = {dist.get_world_size()}, "
         + f"rank = {dist.get_rank()}, local_rank = {local_rank}, backend={dist.get_backend()}"
     )
+    # set random seed
+    np.random.seed(config.train.seed)
+    random.seed(config.train.seed)
+    torch.manual_seed(config.train.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(config.train.seed)
+        torch.cuda.manual_seed_all(config.train.seed)
+    torch.backends.cudnn.benchmark = True
+    print('set seed for random, numpy and torch')
     worker(local_rank, local_world_size, config)
 
 
